@@ -1,0 +1,504 @@
+"""Steady-state model: analytical epsilon-NTU solution and the steady BVP.
+
+Math doc: Section 3 (control-volume balances Eq 1-3, wall elimination Eq 4-5,
+the two-ODE system Eq 6, boundary conditions Eq 7-8, dimensionless form Eq 9,
+analytical solution Eq 10-14, duty and energy closure Eq 16), Section 5
+(collocation with continuation Eq 23, shooting Eq 24, sizing Eq 25-26) and
+Section 7.2 (analytical derivative Eq 42).
+
+Physics conventions (CLAUDE.md): x runs from 0 to L. The hot stream enters at
+x = 0 and flows +x; the cold stream enters at x = L and flows -x. Both dT/dx are
+negative in normal operation. The steady problem is a BVP because the two known
+inlet temperatures sit at opposite ends.
+
+Imports: numpy, scipy.integrate (solve_bvp, solve_ivp, quad, simpson),
+scipy.optimize (brentq), src.properties and src.correlations. Used by
+transient.py (initial guess) and sensitivity.py.
+
+The steady result dict (returned by solve_steady and solve_steady_shooting)
+-------------------------------------------------------------------------
+    "x"        (n_out,)  evenly spaced positions from 0 to L [m]
+    "T_h"      (n_out,)  hot stream temperature [K]
+    "T_c"      (n_out,)  cold stream temperature [K]
+    "T_w"      (n_out,)  wall (metal) temperature from Eq 4 [K]
+    "a_h","a_c","U_prime" (n_out,)  conductances per unit length [W/(m K)]
+    "sol"      scipy result (solve_bvp result, or the dense solve_ivp result for shooting)
+    "method"   "collocation" or "shooting"
+"""
+
+import numpy as np
+from scipy.integrate import quad, simpson, solve_bvp, solve_ivp
+from scipy.optimize import brentq
+
+from src import correlations, properties
+
+
+def wall_temperature(T_h, T_c, a_h, a_c):
+    """Wall (metal) temperature from the steady wall balance.
+
+    Eq 3 solved for T_w gives Eq 4: T_w = (a_h T_h + a_c T_c)/(a_h + a_c),
+    a conductance-weighted average of the two stream temperatures.
+
+    Parameters
+    ----------
+    T_h, T_c : ndarray, same shape
+        Hot and cold stream temperatures [K].
+    a_h, a_c : ndarray, same shape
+        Side conductances per unit length [W/(m K)].
+
+    Returns
+    -------
+    T_w : ndarray, same shape
+        Wall temperature [K].
+    """
+    # 1. T_w = (a_h T_h + a_c T_c) / (a_h + a_c).
+    # Check: a_h = a_c gives the arithmetic mean; the stream-to-metal
+    #    differences satisfy Eq 5, e.g. T_h - T_w = a_c/(a_h + a_c) (T_h - T_c).
+    raise NotImplementedError
+
+
+def effectiveness(NTU, C_r):
+    """Counterflow effectiveness.
+
+    Eq 13: eps = (1 - E)/(1 - C_r E) with E = exp(-NTU (1 - C_r)); for
+    balanced flow (C_r = 1) eps = NTU/(1 + NTU).
+
+    Parameters
+    ----------
+    NTU : float
+        Number of transfer units U'L/C_min [-].
+    C_r : float
+        Capacity ratio C_min/C_max, 0 <= C_r <= 1 [-].
+
+    Returns
+    -------
+    eps : float
+        Effectiveness Q/Q_max [-].
+    """
+    # 1. If C_r == 1 exactly: return NTU/(1 + NTU).
+    # 2. Otherwise k = NTU (1 - C_r) and one_minus_E = -np.expm1(-k) (accurate
+    #    when k is small, where 1 - exp(-k) would lose digits to cancellation).
+    # 3. eps = one_minus_E / (one_minus_E + (1 - C_r) E), which is Eq 13 with
+    #    the denominator 1 - C_r E rewritten as (1 - E) + (1 - C_r) E so that
+    #    it stays accurate as C_r -> 1.
+    # Check: C_r = 0 gives 1 - exp(-NTU); C_r = 1 - 1e-9 agrees with C_r = 1
+    #    to ~1e-9; NTU = 3, C_r = 0.5 gives 0.8744.
+    raise NotImplementedError
+
+
+def ntu_from_effectiveness(eps, C_r):
+    """Number of transfer units needed for a target effectiveness.
+
+    Eq 26: NTU = ln[(1 - C_r eps)/(1 - eps)] / (1 - C_r); for C_r = 1,
+    NTU = eps/(1 - eps). Used for the sizing bracket and for hand estimates.
+
+    Parameters
+    ----------
+    eps : float
+        Target effectiveness, 0 <= eps < 1 [-].
+    C_r : float
+        Capacity ratio [-].
+
+    Returns
+    -------
+    NTU : float
+        Number of transfer units [-].
+    """
+    # 1. If eps >= 1 raise ValueError (unreachable with a finite exchanger).
+    # 2. If C_r == 1 exactly: return eps/(1 - eps).
+    # 3. Otherwise NTU = np.log1p((1 - C_r) eps/(1 - eps)) / (1 - C_r).
+    #    This is Eq 26 with the log argument rewritten as
+    #    1 + (1 - C_r) eps/(1 - eps), so it tends smoothly to eps/(1 - eps).
+    # Check: effectiveness(ntu_from_effectiveness(e, C_r), C_r) == e for
+    #    several e and C_r, including C_r = 1.
+    raise NotImplementedError
+
+
+def depsilon_dNTU(NTU, C_r):
+    """Exact derivative of the effectiveness with respect to NTU.
+
+    Eq 42: d eps/d NTU = (1 - C_r)^2 E/(1 - C_r E)^2, with limit 1/(1 + NTU)^2
+    as C_r -> 1. Used to test the finite-difference sensitivity code
+    (Section 7.2).
+
+    Parameters
+    ----------
+    NTU : float
+        Number of transfer units [-].
+    C_r : float
+        Capacity ratio [-].
+
+    Returns
+    -------
+    deps_dNTU : float
+        Derivative [-].
+    """
+    # 1. If C_r == 1 exactly: return 1/(1 + NTU)^2.
+    # 2. Otherwise E = exp(-NTU (1 - C_r)) and evaluate Eq 42, writing
+    #    1 - C_r E as (1 - E) + (1 - C_r) E as in effectiveness().
+    # Check: central difference of effectiveness() with step 1e-5 agrees to
+    #    ~1e-9; C_r = 1 - 1e-9 agrees with the C_r = 1 branch.
+    raise NotImplementedError
+
+
+def analytical_profiles(x, L, T_h_in, T_c_in, C_h, C_c, U_prime):
+    """Constant-property temperature profiles (verification case and initial guess).
+
+    Section 3.5, Eq 9-12, written so the same formula holds whichever stream
+    is C_min. With xi = x/L, NTU_h = U'L/C_h, NTU_c = U'L/C_c and
+    k = NTU_h - NTU_c, subtracting the two equations of Eq 9 gives
+    dDelta/dxi = -k Delta for Delta = theta_h - theta_c, so
+      Delta(xi)   = Delta_0 exp(-k xi)
+      theta_h(xi) = 1 - NTU_h Delta_0 g(xi),  g(xi) = (1 - exp(-k xi))/k
+      theta_c(xi) = theta_h(xi) - Delta(xi)
+      Delta_0     = 1 / (exp(-k) + NTU_h g(1))     (from theta_c(1) = 0)
+    For hot = C_min this is exactly Eq 10-12. Eq 11 as printed (with the
+    factor 1/(1 - C_r)) only holds when the hot stream is C_min (flagged).
+
+    Parameters
+    ----------
+    x : ndarray, shape (n,)
+        Positions, 0 <= x <= L [m].
+    L : float
+        Core length [m].
+    T_h_in, T_c_in : float
+        Inlet temperatures [K].
+    C_h, C_c : float
+        Heat capacity rates mdot*cp of each stream [W/K].
+    U_prime : float
+        Overall conductance per unit length [W/(m K)].
+
+    Returns
+    -------
+    T_h, T_c : ndarray, shape (n,)
+        Temperature profiles [K].
+    """
+    # 1. xi = x/L; NTU_h = U'L/C_h; NTU_c = U'L/C_c; k = NTU_h - NTU_c.
+    # 2. g(z) = -np.expm1(-k z)/k, accurate for small k. If |k| < ~1e-12
+    #    (balanced flow), use the limit g(z) = z instead of dividing by k.
+    # 3. Delta_0 = 1/(np.exp(-k) + NTU_h g(1)).
+    # 4. theta_h = 1 - NTU_h Delta_0 g(xi); theta_c = theta_h - Delta_0 exp(-k xi).
+    # 5. Back to kelvin: T = T_c_in + theta (T_h_in - T_c_in).
+    # Pitfall: the largest T_h - T_c (Eq 14) is at the warm end (x = 0) only
+    #    when hot is C_min. When cold is C_min (the base case), it is at the
+    #    cold end (x = L). Its value is Delta_0 (T_h_in - T_c_in) either way.
+    # Check: theta_h(0) = 1 and theta_c(1) = 0 to round-off; the effectiveness
+    #    C_h (1 - theta_h(1))/C_min equals effectiveness(NTU, C_r) from Eq 13
+    #    for hot = C_min, cold = C_min and C_r = 1; at C_r = 1 both profiles are
+    #    straight lines with Delta_0 = 1/(1 + NTU); results at C_r = 1 +- 1e-9
+    #    are continuous.
+    raise NotImplementedError
+
+
+def steady_rhs(x, y, params, props, geom):
+    """Right-hand side of the steady two-ODE system for solve_bvp / solve_ivp.
+
+    Eq 6 (from Eq 1-4):
+      dT_h/dx = -U'(T_h, T_c) (T_h - T_c) / (mdot_h cp_h(T_h))
+      dT_c/dx = -U'(T_h, T_c) (T_h - T_c) / (mdot_c cp_c(T_c))
+
+    Parameters
+    ----------
+    x : ndarray, shape (m,)
+        Mesh positions [m] (unused: the system is autonomous, but solve_bvp
+        passes it).
+    y : ndarray, shape (2, m)
+        y[0] = T_h, y[1] = T_c [K] at each mesh point. solve_ivp (shooting)
+        passes shape (2,); write the function so both shapes work.
+    params : dict
+        Uses mdot_h, mdot_c (and what correlations.conductances needs).
+    props : dict
+        Surrogates; possibly continuation copies (lam < 1).
+    geom : dict
+        From correlations.exchanger_geometry.
+
+    Returns
+    -------
+    dydx : ndarray, same shape as y
+        [dT_h/dx, dT_c/dx] [K/m].
+    """
+    # 1. T_h = y[0], T_c = y[1] (shape (m,) or scalar).
+    # 2. a_h, a_c = correlations.conductances(T_h, T_c, mdot_h, mdot_c,
+    #    params, props, geom); U' = correlations.overall_conductance(a_h, a_c).
+    # 3. Local heat flow per unit length q' = U' (T_h - T_c)   (Eq 4).
+    # 4. cp_h = properties.evaluate(props["h"], "cp", T_h);
+    #    cp_c = properties.evaluate(props["c"], "cp", T_c). The cold cp is at
+    #    T_c, never T_h (CLAUDE.md).
+    # 5. dT_h/dx = -q'/(mdot_h cp_h); dT_c/dx = -q'/(mdot_c cp_c).
+    #    BOTH are negative. The cold sign is negative because the cold stream
+    #    flows in -x: it is heated as it moves toward x = 0, so its
+    #    temperature falls with x (Eq 2).
+    # 6. Return np.vstack((dT_h/dx, dT_c/dx)) (or np.array([...]) for shape
+    #    (2,)). solve_bvp requires the full (2, m) array: never loop over
+    #    mesh points.
+    # Pitfall: never call CoolProp here; only properties.evaluate.
+    # Check: with constant surrogates, steady_rhs at the analytical profile
+    #    equals the analytical derivative; at T_h == T_c it returns zeros.
+    raise NotImplementedError
+
+
+def steady_bc(ya, yb, T_h_in, T_c_in):
+    """Boundary residuals for solve_bvp.
+
+    Eq 7-8: T_h(0) = T_h_in (hot enters at x = 0), T_c(L) = T_c_in (cold
+    enters at x = L).
+
+    Parameters
+    ----------
+    ya : ndarray, shape (2,)
+        [T_h(0), T_c(0)] [K].
+    yb : ndarray, shape (2,)
+        [T_h(L), T_c(L)] [K].
+    T_h_in, T_c_in : float
+        Inlet temperatures [K].
+
+    Returns
+    -------
+    residual : ndarray, shape (2,)
+        [T_h(0) - T_h_in, T_c(L) - T_c_in] [K].
+    """
+    # 1. Return np.array([ya[0] - T_h_in, yb[1] - T_c_in]).
+    # Pitfall: the hot condition uses ya (x = 0) and the cold condition uses
+    #    yb (x = L). Swapping them gives a parallel-flow exchanger.
+    # Check: the analytical profiles give a zero residual.
+    raise NotImplementedError
+
+
+def initial_guess(x, params, props, geom):
+    """Initial guess for solve_bvp: analytical profiles at mean properties.
+
+    Section 5.1: the analytical profile Eq 11 evaluated with mean properties.
+    Using the surrogates' mean values (phi_bar of Eq 23) makes this guess the
+    exact solution of the lambda = 0 continuation problem.
+
+    Parameters
+    ----------
+    x : ndarray, shape (m,)
+        Initial mesh [m].
+    params : dict
+        Uses L, T_h_in, T_c_in, mdot_h, mdot_c.
+    props : dict
+        Surrogates.
+    geom : dict
+        From correlations.exchanger_geometry.
+
+    Returns
+    -------
+    y_guess : ndarray, shape (2, m)
+        [T_h, T_c] at the mesh points [K].
+    """
+    # 1. props0 = {side: properties.continuation_surrogate(props[side], 0.0)}:
+    #    every property is now its mean value, so a_h, a_c are constants.
+    # 2. a_h, a_c from correlations.conductances at any in-range temperatures
+    #    (e.g. the surrogates' T_bar), then U' = overall_conductance(a_h, a_c).
+    # 3. C_h = mdot_h * mean cp_h, C_c = mdot_c * mean cp_c.
+    # 4. T_h, T_c = analytical_profiles(x, L, T_h_in, T_c_in, C_h, C_c, U').
+    # 5. Return np.vstack((T_h, T_c)).
+    # Check: steady_bc(y_guess[:, 0], y_guess[:, -1], ...) is zero; both rows
+    #    decrease with x.
+    raise NotImplementedError
+
+
+def solve_steady(params, props):
+    """Solve the steady variable-property BVP by collocation.
+
+    Section 5.1: solve_bvp on Eq 6 with boundary conditions Eq 8, starting
+    from the analytical guess. If it fails, use property continuation (Eq 23):
+    solve lambda = 0, 0.25, ..., 1 in turn, each from the previous solution.
+
+    Parameters
+    ----------
+    params : dict
+        Uses L, T_h_in, T_c_in, mdot_h, mdot_c, bvp_tol, bvp_max_nodes,
+        continuation_lams, n_out (plus geometry and model options).
+    props : dict
+        Surrogates from properties.build_surrogates.
+
+    Returns
+    -------
+    steady : dict
+        Steady result dict (see module docstring), method "collocation".
+
+    Raises
+    ------
+    RuntimeError
+        If the solve fails even with continuation. Report sol.message; do not
+        retry with a looser tolerance (CLAUDE.md).
+    """
+    # 1. geom = correlations.exchanger_geometry(params) (build it here so a
+    #    perturbed params never meets a stale geometry).
+    # 2. Initial mesh x0 = np.linspace(0, L, ~50); y0 = initial_guess(x0, ...).
+    # 3. Wrap the RHS and BCs for scipy:
+    #      fun(x, y) = steady_rhs(x, y, params, props, geom)
+    #      bc(ya, yb) = steady_bc(ya, yb, T_h_in, T_c_in)
+    # 4. sol = solve_bvp(fun, bc, x0, y0, tol=bvp_tol, max_nodes=bvp_max_nodes).
+    #    tol is a relative tolerance on the collocation residual, not on T
+    #    itself, which is why tests tighten it to 1e-8.
+    # 5. If sol.status != 0: continuation. For lam in continuation_lams:
+    #    props_lam = {side: properties.continuation_surrogate(props[side], lam)},
+    #    solve from the previous solution (x = sol.x, y = sol.y). Stop with
+    #    RuntimeError if any step fails.
+    # 6. Post-process on x = np.linspace(0, L, n_out): T_h, T_c = sol.sol(x)
+    #    (the dense, C1-continuous collocation interpolant); a_h, a_c from
+    #    correlations.conductances; U' = overall_conductance(a_h, a_c);
+    #    T_w = wall_temperature(T_h, T_c, a_h, a_c).
+    # 7. Return the dict with sol and method = "collocation".
+    # Pitfall: if properties.check_range raises during the solve, the iterate
+    #    left the fitted range. Widen fit_T_margin or improve the guess;
+    #    never remove the check.
+    # Check: tests/test_steady.py (constant properties vs epsilon-NTU, energy
+    #    closure, collocation vs shooting).
+    raise NotImplementedError
+
+
+def shooting_residual(sigma, params, props, geom):
+    """Shooting residual for a trial cold-outlet temperature.
+
+    Section 5.2, Eq 24: integrate Eq 6 from x = 0 with
+    y(0) = [T_h_in, sigma] and return r(sigma) = T_c(L; sigma) - T_c_in.
+
+    Parameters
+    ----------
+    sigma : float
+        Trial cold outlet temperature T_c(0) [K], T_c_in < sigma < T_h_in.
+    params : dict
+        Uses L, T_h_in, T_c_in, mdot_h, mdot_c.
+    props : dict
+        Surrogates.
+    geom : dict
+        From correlations.exchanger_geometry.
+
+    Returns
+    -------
+    r : float
+        Residual [K]. Negative means sigma is too low (T_c falls below T_c_in
+        before x = L).
+    """
+    # 1. Integrate with solve_ivp(fun=lambda x, y: steady_rhs(x, y, ...),
+    #    t_span=(0, L), y0=[T_h_in, sigma]), method "LSODA" or "Radau",
+    #    rtol ~ 1e-10, atol ~ 1e-8. Tight tolerances matter: the map
+    #    sigma -> T_c(L) is very sensitive at large NTU (1 - C_r).
+    # 2. Add a terminal event that fires when T_c reaches the bottom of the
+    #    cold surrogate's range (event(x, y) = y[1] - surr_c["T_lo"],
+    #    event.terminal = True, event.direction = -1). A trial sigma that is
+    #    too low drives T_c below T_c_in by construction, and without the
+    #    event properties.check_range would raise mid-integration.
+    # 3. If the event fired before L: return T_lo_c - T_c_in (negative). It
+    #    has the correct sign, which is all brentq needs to keep its bracket.
+    # 4. Otherwise return T_c(L) - T_c_in.
+    # Check: r is increasing in sigma; r(sigma) is ~0 at the collocation
+    #    solution's T_c(0).
+    raise NotImplementedError
+
+
+def solve_steady_shooting(params, props):
+    """Solve the steady problem by shooting (cross-check for collocation).
+
+    Section 5.2: find sigma with r(sigma) = 0 (Eq 24) using brentq on the
+    bracket T_c_in < sigma < T_h_in, then integrate once more for profiles.
+
+    Parameters
+    ----------
+    params : dict
+        As for solve_steady.
+    props : dict
+        Surrogates.
+
+    Returns
+    -------
+    steady : dict
+        Steady result dict (see module docstring), method "shooting",
+        "sol" = the final dense solve_ivp result.
+    """
+    # 1. geom = correlations.exchanger_geometry(params).
+    # 2. sigma* = brentq(shooting_residual, T_c_in + eps, T_h_in - eps,
+    #    args=(params, props, geom), xtol ~ 1e-10) with eps ~ 1e-6 K. The ends
+    #    of the bracket have opposite signs physically (a cold outlet at the
+    #    cold inlet temperature, or at the hot inlet temperature, are both
+    #    impossible).
+    # 3. Re-integrate from y(0) = [T_h_in, sigma*] with dense_output=True,
+    #    evaluate on x = np.linspace(0, L, n_out), and fill the same fields as
+    #    solve_steady (conductances, U', T_w).
+    # Check: test_collocation_matches_shooting: profiles agree with
+    #    solve_steady to ~1e-3 K for the variable-property base case.
+    raise NotImplementedError
+
+
+def energy_balance(steady, params, props):
+    """Heat duty computed three independent ways (energy closure).
+
+    Eq 16:
+      Q_h   = mdot_h [hhat_h(T_h(0)) - hhat_h(T_h(L))]
+      Q_c   = mdot_c [hhat_c(T_c(0)) - hhat_c(T_c(L))]
+      Q_int = integral from 0 to L of U'(T_h - T_c) dx
+
+    Parameters
+    ----------
+    steady : dict
+        Result of solve_steady or solve_steady_shooting.
+    params : dict
+        Uses mdot_h, mdot_c, L.
+    props : dict
+        Surrogates (properties.enthalpy is used for hhat).
+
+    Returns
+    -------
+    duty : dict
+        "Q_h", "Q_c", "Q_int" [W]; "closure_hc" = |Q_h - Q_c|/Q_h and
+        "closure_int" = |Q_h - Q_int|/Q_h [-].
+    """
+    # 1. End values from the solution arrays: T_h(0) = T_h[0] (hot inlet),
+    #    T_h(L) = T_h[-1] (hot outlet), T_c(0) = T_c[0] (cold outlet),
+    #    T_c(L) = T_c[-1] (cold inlet).
+    # 2. Q_h and Q_c from properties.enthalpy on each side's own surrogate.
+    # 3. Q_int: if a collocation sol is available, integrate
+    #    q'(x) = U'(x) (T_h(x) - T_c(x)) with scipy.integrate.quad, evaluating
+    #    T from sol.sol(x) and U' from correlations.conductances, with
+    #    epsrel ~ 1e-10 and limit ~ 200. Otherwise use
+    #    scipy.integrate.simpson on the (n_out,) arrays.
+    # 4. Relative closures as in the Returns section.
+    # Pitfall: this check only works if d(hhat)/dT = cp in the surrogates
+    #    (enthalpy integrated from the cp fit). If hhat came straight from
+    #    CoolProp, the closure would be stuck at the fit error (~1e-3).
+    # Check: tests/test_steady.py::test_energy_closure (both closures < 1e-4).
+    raise NotImplementedError
+
+
+def size_length(Q_target, params, props):
+    """Core length that delivers a target duty.
+
+    Section 5.3, Eq 25-26: solve g(L) = Q(L) - Q* = 0 by bracketing, where
+    each Q(L) is a full variable-property BVP solve. The constant-property
+    inverse (Eq 26) gives the starting bracket.
+
+    Parameters
+    ----------
+    Q_target : float
+        Target duty Q* [W].
+    params : dict
+        Base parameters; L is overwritten on copies.
+    props : dict
+        Surrogates.
+
+    Returns
+    -------
+    L : float
+        Core length [m] with Q(L) = Q_target.
+
+    Raises
+    ------
+    ValueError
+        If Q_target >= Q_max = C_min (T_h_in - T_c_in): no finite core can
+        deliver it.
+    """
+    # 1. Mean-property estimate (as in initial_guess): C_h, C_c, C_min, C_r, U'.
+    # 2. eps* = Q_target / (C_min (T_h_in - T_c_in)); raise if eps* >= 1.
+    # 3. NTU_0 = ntu_from_effectiveness(eps*, C_r); L_0 = NTU_0 C_min / U'
+    #    (Eq 26).
+    # 4. g(L): p = dict(params); p["L"] = L (copy, never mutate params);
+    #    Q = energy_balance(solve_steady(p, props), p, props)["Q_h"];
+    #    return Q - Q_target.
+    # 5. Bracket [0.5 L_0, 2 L_0]; widen geometrically until g changes sign
+    #    (Q increases monotonically with L), then brentq(g, a, b, xtol ~ 1e-6 L_0).
+    # Check: with constant surrogates the result equals L_0 from Eq 26.
+    raise NotImplementedError
