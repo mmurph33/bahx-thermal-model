@@ -1,0 +1,6 @@
+numpy
+scipy
+matplotlib
+CoolProp
+jupyter
+pytest
