@@ -1,17 +1,16 @@
 """Closure relations: fin geometry, heat transfer coefficient and side conductances.
 
 Math doc: Section 4.1 (offset strip fin geometry, Eq 17-18), Section 4.2
-(Manglik-Bergles j and f, Eq 19-21), Section 4.3 (fin and surface efficiency,
-Eq 22), Section 6.5 (laminar floor on h at low flow), Section 8.1 (fitted
-Colburn factor, Eq 48) and Section 3.2 (overall conductance, Eq 4).
+(Manglik-Bergles Colburn factor, Eq 19 and 21), Section 4.3 (fin and surface
+efficiency, Eq 22), Section 6.5 (laminar floor on h at low flow) and
+Section 3.2 (overall conductance, Eq 4).
 
 These functions turn local stream temperatures into the side conductances
 a = eta_o h A' [W/(m K)] that drive both the steady BVP and the transient model.
 Because h depends on the local properties, a_h and a_c are re-evaluated at every
 collocation point and every cell; this is where the model becomes nonlinear.
 
-Imports: numpy and src.properties (evaluate). Used by steady.py, transient.py,
-sensitivity.py and regression.py.
+Imports: numpy and src.properties (evaluate). Used by steady.py and transient.py.
 
 Naming (CLAUDE.md): fin height is b (h is the heat transfer coefficient);
 Manglik-Bergles ratios are alpha_mb = s/b, delta_mb = t/l, gamma_mb = t/s.
@@ -164,64 +163,13 @@ def colburn_j(Re, alpha_mb, delta_mb, gamma_mb):
     #    1995 paper before the final report (CLAUDE.md team note). Outside the
     #    Re range, warn or rely on the laminar floor in
     #    heat_transfer_coefficient.
+    # Pitfall: do not copy the j formula from the proposal; it has
+    #    transcription errors (alpha^-0.541, gamma^+0.0678, 5.29e-5 and
+    #    gamma^+1.055 should be alpha^-0.1541, gamma^-0.0678, 5.269e-5 and
+    #    gamma^-1.055). Use Eq 19 as written above (it matches CLAUDE.md).
     # Check: hand-compute j at Re = 3400 for the suggested fin
     #    (alpha = 0.244, delta = 0.032, gamma = 0.067); expect j ~ 0.009.
     #    j should fall smoothly with Re with no jump.
-    raise NotImplementedError
-
-
-def colburn_j_surface(Re, beta):
-    """Colburn factor of one fitted surface (four-parameter form).
-
-    Eq 48: ln j = ln beta1 + beta2 ln Re + 0.1 ln(1 + beta3 Re^beta4),
-    i.e. j = beta1 Re^beta2 (1 + beta3 Re^beta4)^0.1.
-
-    Parameters
-    ----------
-    Re : ndarray
-        Reynolds number [-].
-    beta : array_like, shape (4,)
-        Fitted parameters (beta1, beta2, beta3, beta4), from regression.py.
-
-    Returns
-    -------
-    j : ndarray, same shape as Re
-        Colburn factor [-].
-    """
-    # 1. Unpack beta1..beta4 (beta1 > 0, beta3 > 0).
-    # 2. j = beta1 * Re**beta2 * (1 + beta3 * Re**beta4)**0.1.
-    # Check: with the Manglik-Bergles starting guess from
-    #    regression.mb_initial_guess(alpha, delta, gamma), this equals
-    #    colburn_j(Re, alpha, delta, gamma) to round-off.
-    raise NotImplementedError
-
-
-def fanning_f(Re, alpha_mb, delta_mb, gamma_mb):
-    """Manglik-Bergles Fanning friction factor (pressure-drop extension).
-
-    Eq 20:
-      f = 9.6243 Re^-0.7422 alpha^-0.1856 delta^0.3053 gamma^-0.2659
-          * [1 + 7.669e-8 Re^4.429 alpha^0.920 delta^3.767 gamma^0.236]^0.1
-    Used only for the optional pressure-drop ODEs of Section 3.6 (Eq 15) and
-    to report Delta p as a sanity check.
-
-    Parameters
-    ----------
-    Re : ndarray
-        Reynolds number [-].
-    alpha_mb, delta_mb, gamma_mb : float
-        Geometry ratios [-].
-
-    Returns
-    -------
-    f : ndarray, same shape as Re
-        Fanning friction factor [-].
-    """
-    # 1. Same structure as colburn_j with the Eq 20 coefficients.
-    # 2. Pressure drop over the core (constant properties):
-    #    Delta p = 4 f (L/D_h) G^2 / (2 rho)   (Section 3.6).
-    # Check: f > j at the same Re (friction exceeds heat transfer for offset
-    #    strip fins); Delta p for the base case should be a few kPa.
     raise NotImplementedError
 
 
@@ -256,12 +204,13 @@ def laminar_nusselt_rect(alpha_mb):
     raise NotImplementedError
 
 
-def heat_transfer_coefficient(mdot, cp, mu, k, side_geom, zeta=1.0, beta=None):
+def heat_transfer_coefficient(mdot, cp, mu, k, side_geom):
     """Convective heat transfer coefficient on one side.
 
-    Eq 21: h = j G cp Pr^(-2/3), Pr = cp mu / k, with j from Eq 19
-    (Manglik-Bergles) or Eq 48 (fitted surface), times the multiplier zeta
-    (Section 8.3), and bounded below by the laminar value (Section 6.5).
+    Eq 21: h = j G cp Pr^(-2/3), Pr = cp mu / k, with j from the
+    Manglik-Bergles correlation (Eq 19), bounded below by the laminar value
+    (Section 6.5). The proposal writes the same thing as h = j rho u cp Pr^(-2/3),
+    since rho u = G.
 
     Parameters
     ----------
@@ -272,11 +221,6 @@ def heat_transfer_coefficient(mdot, cp, mu, k, side_geom, zeta=1.0, beta=None):
         [J/(kg K)], [Pa s], [W/(m K)].
     side_geom : dict
         Geometry of this passage.
-    zeta : float, optional
-        Colburn multiplier j -> zeta j [-] (params["zeta_j"]).
-    beta : array_like, shape (4,), optional
-        Fitted Colburn parameters (params["colburn_beta"]). None means use
-        Manglik-Bergles (Eq 19).
 
     Returns
     -------
@@ -284,8 +228,7 @@ def heat_transfer_coefficient(mdot, cp, mu, k, side_geom, zeta=1.0, beta=None):
         Heat transfer coefficient [W/(m^2 K)].
     """
     # 1. G = mdot / A_ff; Re = reynolds(mdot, mu, side_geom).
-    # 2. j = colburn_j(Re, alpha_mb, delta_mb, gamma_mb) if beta is None,
-    #    else colburn_j_surface(Re, beta). Multiply by zeta.
+    # 2. j = colburn_j(Re, alpha_mb, delta_mb, gamma_mb) with this side's ratios.
     # 3. Pr = cp mu / k; h_corr = j G cp Pr^(-2/3)   (Eq 21).
     # 4. Laminar floor: h_lam = laminar_nusselt_rect(alpha_mb) k / D_h;
     #    h = np.maximum(h_corr, h_lam). At design flow the floor is inactive.
@@ -327,6 +270,9 @@ def fin_efficiency(h, k_f, side_geom):
     # 2. ell_f = b/2; x = m ell_f.
     # 3. eta_f = tanh(x)/x. As x -> 0, eta_f -> 1; it is safe for h > 0, but
     #    guard x == 0 with np.where if you ever pass h = 0.
+    # Note: the proposal writes m = sqrt(2 h/(k_f t_f)) with a fin length L_f.
+    #    Eq 22 adds the strip-edge factor (1 + t/l) and fixes L_f = ell_f = b/2;
+    #    follow Eq 22 (the difference is ~1.6 % in m for the suggested fin).
     # Check: base case (h ~ 450, k_f = 180, t = 0.1 mm, b = 6.25 mm) gives
     #    m ell_f ~ 0.7 and eta_f ~ 0.86. Larger h or taller fins -> lower eta_f.
     raise NotImplementedError
@@ -354,7 +300,7 @@ def surface_efficiency(eta_f, side_geom):
     raise NotImplementedError
 
 
-def side_conductance(T, mdot, surr, side_geom, k_f, zeta=1.0, beta=None):
+def side_conductance(T, mdot, surr, side_geom, k_f):
     """Side conductance per unit length a = eta_o h A'.
 
     Combines Eq 21 and Eq 22 (CLAUDE.md: a = eta_o * h * A' [W/(m K)]).
@@ -372,10 +318,6 @@ def side_conductance(T, mdot, surr, side_geom, k_f, zeta=1.0, beta=None):
         Geometry of this passage.
     k_f : float
         Fin conductivity [W/(m K)].
-    zeta : float, optional
-        Colburn multiplier [-].
-    beta : array_like, shape (4,), optional
-        Fitted Colburn parameters, or None for Manglik-Bergles.
 
     Returns
     -------
@@ -384,7 +326,7 @@ def side_conductance(T, mdot, surr, side_geom, k_f, zeta=1.0, beta=None):
     """
     # 1. cp, mu, k = properties.evaluate(surr, name, T) for each name. This
     #    also enforces the fitted range.
-    # 2. h = heat_transfer_coefficient(mdot, cp, mu, k, side_geom, zeta, beta).
+    # 2. h = heat_transfer_coefficient(mdot, cp, mu, k, side_geom).
     # 3. eta_f = fin_efficiency(h, k_f, side_geom);
     #    eta_o = surface_efficiency(eta_f, side_geom).
     # 4. a = eta_o h A_prime.
@@ -408,7 +350,7 @@ def conductances(T_h, T_c, mdot_h, mdot_c, params, props, geom):
     mdot_h, mdot_c : float
         Current mass flows per passage [kg/s].
     params : dict
-        Uses k_f, zeta_j, colburn_beta.
+        Uses k_f.
     props : dict
         {"h": hot surrogate, "c": cold surrogate}.
     geom : dict
@@ -419,10 +361,8 @@ def conductances(T_h, T_c, mdot_h, mdot_c, params, props, geom):
     a_h, a_c : ndarray, same shape as T_h
         Side conductances per unit length [W/(m K)].
     """
-    # 1. a_h = side_conductance(T_h, mdot_h, props["h"], geom["h"], k_f,
-    #    zeta_j, colburn_beta).
-    # 2. a_c = side_conductance(T_c, mdot_c, props["c"], geom["c"], k_f,
-    #    zeta_j, colburn_beta).
+    # 1. a_h = side_conductance(T_h, mdot_h, props["h"], geom["h"], k_f).
+    # 2. a_c = side_conductance(T_c, mdot_c, props["c"], geom["c"], k_f).
     # Check: swapping the hot and cold inputs (with identical surrogates and
     #    geometry) swaps the outputs.
     raise NotImplementedError

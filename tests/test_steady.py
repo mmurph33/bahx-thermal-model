@@ -26,7 +26,7 @@ def test_constant_property_matches_epsilon_ntu(case):
     #    p = dict(config.BASE_CASE) and fill every key the solver needs with
     #    explicit test values written in this test (e.g. T_h_in = 300,
     #    T_c_in = 235, W = 1, the suggested fin geometry, k_f = 180,
-    #    zeta_j = 1, colburn_beta = None, n_out = 501, bvp_max_nodes = 10000,
+    #    n_out = 501, bvp_max_nodes = 10000,
     #    continuation_lams = (0, .25, .5, .75, 1)), and set bvp_tol = 1e-8:
     #    solve_bvp controls a relative residual, not the solution error, so a
     #    tight tolerance is needed to check eps to 1e-6. (Tightening the solver

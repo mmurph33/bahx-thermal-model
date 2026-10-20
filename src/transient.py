@@ -19,9 +19,14 @@ mdot*cp*(T[i] - T[i-1])/dx. The two forms agree at constant cp. Following the
 team's decision, this module uses the math doc's enthalpy form; CLAUDE.md
 should be updated to match.
 
+Note on the proposal: its cold-stream transient equation has the wrong sign
+(+mdot_c cp_c dT_c/dx and -a_c (T_w - T_c)), and it applies the stencil
+(T_i - T_i-1)/dx to both streams, which is downwind for the cold stream.
+Follow Eq 28 and Eq 33 (and CLAUDE.md) instead.
+
 Imports: numpy, scipy.integrate.solve_ivp, scipy.sparse (Jacobian pattern),
 scipy.optimize.root, src.properties, src.correlations and src.steady (initial
-guess). Used by sensitivity.py; metrics.py consumes the result dict.
+guess). metrics.py consumes the result dict.
 
 State vector (Section 6.3), shape (3N,), ordered cell by cell:
   y = [T_h,1, T_c,1, T_w,1, T_h,2, T_c,2, T_w,2, ..., T_h,N, T_c,N, T_w,N]

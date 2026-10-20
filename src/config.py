@@ -9,10 +9,10 @@ How to use
     from src import config
     params = dict(config.BASE_CASE)          # a copy; never edit BASE_CASE itself
 
-and pass ``params`` to the solvers. For a study, change a copy:
+and pass ``params`` to the solvers. For a study (e.g. a sweep of ramp rates or
+a grid-convergence run), change a copy:
 
-    from src import sensitivity
-    p = sensitivity.with_parameter(params, "b_h", 1.01 * params["b_h"])
+    p = dict(params, ramp_t=600.0)           # copy with one value changed
 
 Modules in src/ never import this file. Callers pass ``params`` and
 ``ALPEMA_LIMITS`` in, so every function can be run on a perturbed copy.
@@ -90,8 +90,7 @@ BASE_CASE = {
     # L [m]: core length in the flow direction (domain 0 <= x <= L).
     # TODO: start ~0.7. A rough hand estimate with the suggested fins and flows
     # gives NTU ~ 7 per metre (U' ~ 1.7 kW/(m K), C_min ~ 230 W/K), so 0.7 m
-    # gives NTU ~ 5. Re-check with steady.ntu_from_effectiveness once
-    # correlations.py works.
+    # gives NTU ~ 5. Re-check NTU = U'L/C_min once correlations.py works.
     "L": None,
     # W [m]: core width. Scales A_ff, A' and A_m together, so it cancels out of
     # NTU at fixed G; it sets the absolute duty per passage.
@@ -189,25 +188,16 @@ BASE_CASE = {
     "trip_t_start": None,
 
     # ------------------------------------------------------------------
-    # 6. Model options (Sections 6.1, 8.1, 8.3)
+    # 6. Model options (Section 6.1)
     # ------------------------------------------------------------------
-    # zeta [-]: Colburn-factor multiplier j -> zeta*j on both sides (Section 8.3).
-    # 1.0 is the unmodified correlation; sensitivity studies perturb it.
-    "zeta_j": 1.0,
-    # beta [-], length 4: fitted Colburn parameters (Eq 48) from regression.py.
-    # None (a final value, not a TODO) means use the general Manglik-Bergles
-    # correlation (Eq 19) on both sides.
-    "colburn_beta": None,
     # Include the k_m A_m d2T_w/dx2 term in the wall equation (Eq 29, 34).
-    # TODO: start False (base model); turn on for the axial-conduction study.
+    # The proposal's wall equation has no conduction term; CLAUDE.md and the
+    # math doc keep it as an option.
+    # TODO: start False (base model); turn on for an axial-conduction check.
     "axial_conduction": None,
-    # Path (relative to the repo root) of the CSV of (Re, j) data for one Kays
-    # & London surface, used by regression.py (Section 8.1).
-    # TODO: e.g. "data/kays_london_1-8-15.61.csv" once digitized.
-    "colburn_data_file": None,
 
     # ------------------------------------------------------------------
-    # 7. Numerical settings (Sections 5, 6.3, 7.3, 8.3, 8.4)
+    # 7. Numerical settings (Sections 5, 6.3, 8.4)
     # ------------------------------------------------------------------
     # N [-]: number of finite-volume cells in the transient model (Eq 32-34).
     # Grid convergence uses N, 2N, 4N (Eq 35).
@@ -235,6 +225,9 @@ BASE_CASE = {
     "ivp_atol": None,
     # K [-]: polynomial degree of the property surrogates (Eq 51).
     # TODO: start ~6 (CoolProp check: hot cp error 8e-4 at degree 6 on 225-310 K).
+    # The proposal planned cubic fits over 100-300 K; a cubic gives ~2e-2 error
+    # for hot cp, and 100 K is below the 1.5 MPa saturation temperature
+    # (158.5 K), so keep the fit range inside the single-phase window instead.
     "fit_degree": None,
     # Number of CoolProp sample points per property fit (Section 8.4).
     # TODO: start ~200.
@@ -248,16 +241,6 @@ BASE_CASE = {
     # build_surrogates raises if a fit misses it.
     # TODO: start ~1e-3.
     "fit_max_rel_err": None,
-    # Solver relative tolerance to use when outputs are differenced
-    # (Section 7.3: Delta p/p ~ eta^(1/3)).
-    # TODO: start ~1e-8.
-    "sens_rtol": None,
-    # Number of Monte Carlo samples for uncertainty propagation (Section 8.3).
-    # TODO: start ~300.
-    "mc_samples": None,
-    # Random seed for Monte Carlo, so results are reproducible.
-    # TODO: start 0.
-    "mc_seed": None,
 }
 
 

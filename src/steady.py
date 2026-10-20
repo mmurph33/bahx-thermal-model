@@ -2,9 +2,10 @@
 
 Math doc: Section 3 (control-volume balances Eq 1-3, wall elimination Eq 4-5,
 the two-ODE system Eq 6, boundary conditions Eq 7-8, dimensionless form Eq 9,
-analytical solution Eq 10-14, duty and energy closure Eq 16), Section 5
-(collocation with continuation Eq 23, shooting Eq 24, sizing Eq 25-26) and
-Section 7.2 (analytical derivative Eq 42).
+analytical solution Eq 10-14, duty and energy closure Eq 16) and Section 5
+(collocation with continuation Eq 23, shooting Eq 24). The proposal makes this
+steady model the minimum viable product; shooting is its root-finding backup
+("guess exit temperatures") and our cross-check on collocation.
 
 Physics conventions (CLAUDE.md): x runs from 0 to L. The hot stream enters at
 x = 0 and flows +x; the cold stream enters at x = L and flows -x. Both dT/dx are
@@ -13,7 +14,7 @@ inlet temperatures sit at opposite ends.
 
 Imports: numpy, scipy.integrate (solve_bvp, solve_ivp, quad, simpson),
 scipy.optimize (brentq), src.properties and src.correlations. Used by
-transient.py (initial guess) and sensitivity.py.
+transient.py (initial guess).
 
 The steady result dict (returned by solve_steady and solve_steady_shooting)
 -------------------------------------------------------------------------
@@ -83,61 +84,6 @@ def effectiveness(NTU, C_r):
     #    it stays accurate as C_r -> 1.
     # Check: C_r = 0 gives 1 - exp(-NTU); C_r = 1 - 1e-9 agrees with C_r = 1
     #    to ~1e-9; NTU = 3, C_r = 0.5 gives 0.8744.
-    raise NotImplementedError
-
-
-def ntu_from_effectiveness(eps, C_r):
-    """Number of transfer units needed for a target effectiveness.
-
-    Eq 26: NTU = ln[(1 - C_r eps)/(1 - eps)] / (1 - C_r); for C_r = 1,
-    NTU = eps/(1 - eps). Used for the sizing bracket and for hand estimates.
-
-    Parameters
-    ----------
-    eps : float
-        Target effectiveness, 0 <= eps < 1 [-].
-    C_r : float
-        Capacity ratio [-].
-
-    Returns
-    -------
-    NTU : float
-        Number of transfer units [-].
-    """
-    # 1. If eps >= 1 raise ValueError (unreachable with a finite exchanger).
-    # 2. If C_r == 1 exactly: return eps/(1 - eps).
-    # 3. Otherwise NTU = np.log1p((1 - C_r) eps/(1 - eps)) / (1 - C_r).
-    #    This is Eq 26 with the log argument rewritten as
-    #    1 + (1 - C_r) eps/(1 - eps), so it tends smoothly to eps/(1 - eps).
-    # Check: effectiveness(ntu_from_effectiveness(e, C_r), C_r) == e for
-    #    several e and C_r, including C_r = 1.
-    raise NotImplementedError
-
-
-def depsilon_dNTU(NTU, C_r):
-    """Exact derivative of the effectiveness with respect to NTU.
-
-    Eq 42: d eps/d NTU = (1 - C_r)^2 E/(1 - C_r E)^2, with limit 1/(1 + NTU)^2
-    as C_r -> 1. Used to test the finite-difference sensitivity code
-    (Section 7.2).
-
-    Parameters
-    ----------
-    NTU : float
-        Number of transfer units [-].
-    C_r : float
-        Capacity ratio [-].
-
-    Returns
-    -------
-    deps_dNTU : float
-        Derivative [-].
-    """
-    # 1. If C_r == 1 exactly: return 1/(1 + NTU)^2.
-    # 2. Otherwise E = exp(-NTU (1 - C_r)) and evaluate Eq 42, writing
-    #    1 - C_r E as (1 - E) + (1 - C_r) E as in effectiveness().
-    # Check: central difference of effectiveness() with step 1e-5 agrees to
-    #    ~1e-9; C_r = 1 - 1e-9 agrees with the C_r = 1 branch.
     raise NotImplementedError
 
 
@@ -223,7 +169,8 @@ def steady_rhs(x, y, params, props, geom):
     # 3. Local heat flow per unit length q' = U' (T_h - T_c)   (Eq 4).
     # 4. cp_h = properties.evaluate(props["h"], "cp", T_h);
     #    cp_c = properties.evaluate(props["c"], "cp", T_c). The cold cp is at
-    #    T_c, never T_h (CLAUDE.md).
+    #    T_c, never T_h (CLAUDE.md; the proposal's cold balance writes
+    #    C_p,c(T_h), which is a typo).
     # 5. dT_h/dx = -q'/(mdot_h cp_h); dT_c/dx = -q'/(mdot_c cp_c).
     #    BOTH are negative. The cold sign is negative because the cold stream
     #    flows in -x: it is heated as it moves toward x = 0, so its
@@ -461,44 +408,4 @@ def energy_balance(steady, params, props):
     #    (enthalpy integrated from the cp fit). If hhat came straight from
     #    CoolProp, the closure would be stuck at the fit error (~1e-3).
     # Check: tests/test_steady.py::test_energy_closure (both closures < 1e-4).
-    raise NotImplementedError
-
-
-def size_length(Q_target, params, props):
-    """Core length that delivers a target duty.
-
-    Section 5.3, Eq 25-26: solve g(L) = Q(L) - Q* = 0 by bracketing, where
-    each Q(L) is a full variable-property BVP solve. The constant-property
-    inverse (Eq 26) gives the starting bracket.
-
-    Parameters
-    ----------
-    Q_target : float
-        Target duty Q* [W].
-    params : dict
-        Base parameters; L is overwritten on copies.
-    props : dict
-        Surrogates.
-
-    Returns
-    -------
-    L : float
-        Core length [m] with Q(L) = Q_target.
-
-    Raises
-    ------
-    ValueError
-        If Q_target >= Q_max = C_min (T_h_in - T_c_in): no finite core can
-        deliver it.
-    """
-    # 1. Mean-property estimate (as in initial_guess): C_h, C_c, C_min, C_r, U'.
-    # 2. eps* = Q_target / (C_min (T_h_in - T_c_in)); raise if eps* >= 1.
-    # 3. NTU_0 = ntu_from_effectiveness(eps*, C_r); L_0 = NTU_0 C_min / U'
-    #    (Eq 26).
-    # 4. g(L): p = dict(params); p["L"] = L (copy, never mutate params);
-    #    Q = energy_balance(solve_steady(p, props), p, props)["Q_h"];
-    #    return Q - Q_target.
-    # 5. Bracket [0.5 L_0, 2 L_0]; widen geometrically until g changes sign
-    #    (Q increases monotonically with L), then brentq(g, a, b, xtol ~ 1e-6 L_0).
-    # Check: with constant surrogates the result equals L_0 from Eq 26.
     raise NotImplementedError

@@ -1,9 +1,14 @@
-"""ALPEMA comparison metrics, grid convergence, smooth max and thermal stress.
+"""Thermal-fatigue and ALPEMA metrics, grid convergence, smooth max and thermal stress.
 
 Math doc: Section 6.6 (ALPEMA metrics, Eq 39-40, hourly window), Section 6.3
 (observed order and Richardson extrapolation, Eq 35), Section 7.6 (smooth max,
-Eq 47), Section 9.2 (thermal stress, Eq 53) and Eq 5 (stream-to-metal
-differences at steady state).
+Eq 47, kept for the startup-ramp optimization stretch goal), Section 9.2
+(thermal stress, Eq 53) and Eq 5 (stream-to-metal differences at steady state).
+
+Proposal (Section 4, "Thermal Fatigue Metrics"): |T_h - T_w|, |T_w - T_c|,
+|T_h - T_c|, max dT_w/dt and max dT_w/dx, then sigma ~ E alpha Delta T/(1 - nu).
+All are covered here; max dT_w/dx (wall_gradient) is in the proposal but not yet
+in the math doc (flagged).
 
 Pure post-processing on numpy arrays: this module imports no other src module,
 so it can be written and tested at any time. Callers pass the ALPEMA limits in
@@ -112,9 +117,45 @@ def stream_to_metal(T_h, T_c, T_w):
         Maximum stream-to-metal difference [K].
     """
     # 1. diff = np.maximum(np.abs(T_h - T_w), np.abs(T_w - T_c)) (elementwise).
+    #    (The proposal lists Delta T_hw and Delta T_cw separately; return them
+    #    separately too if the plots need both.)
     # 2. Return np.max(diff, axis=-1).
     # Check: at steady state with a_h = a_c, each difference is half the
     #    stream-to-stream difference (Eq 5).
+    raise NotImplementedError
+
+
+def wall_gradient(T_w, x):
+    """Largest axial wall temperature gradient, in K/m.
+
+    Proposal, Section 4: max |dT_w/dx|, a measure of the in-plane thermal
+    strain along the core. The math doc does not define it yet (flagged): add
+    it to Section 6.6 with an equation number before citing it in the report.
+
+    Parameters
+    ----------
+    T_w : ndarray, shape (n,) or (n_t, N)
+        Wall temperatures (steady profile or transient history) [K].
+    x : ndarray, shape (n,) or (N,)
+        Positions of the T_w values: the steady grid or the cell centres [m].
+
+    Returns
+    -------
+    dTw_dx_max : float or ndarray, shape () or (n_t,)
+        Largest |dT_w/dx| over the core at each time [K/m].
+    """
+    # 1. dTw_dx = np.gradient(T_w, x, axis=-1): second-order central
+    #    differences inside the core, one-sided at the two ends; x may be
+    #    non-uniform.
+    # 2. Return np.max(np.abs(dTw_dx), axis=-1).
+    # Note: np.gradient is fine here because this is a SPATIAL derivative of
+    #    the wall profile at one instant. The CLAUDE.md rule against np.gradient
+    #    is about TIME derivatives (rates come from the right-hand side).
+    # Pitfall: a coarse grid smooths steep wall fronts and under-predicts this
+    #    peak, like R_w; include it in the N, 2N, 4N grid study.
+    # Check: a linear profile T_w = 250 + 10 x returns 10 K/m exactly; for the
+    #    constant-property balanced case (C_r = 1, linear profiles) it equals
+    #    the analytical slope.
     raise NotImplementedError
 
 
@@ -172,14 +213,17 @@ def alpema_metrics(result, window=3600.0):
         Time series, each shape (n_t,): "t", "R_w" [K/min], "R_end" [K/min]
         (None for the quasi-steady model), "dT_ss" [K], "dT_sm" [K],
         "dT_hour" [K] (from the outlet temperatures T_h,N and T_c,1, the
-        nozzle quantities ALPEMA measures; also report the T_w version).
+        nozzle quantities ALPEMA measures; also report the T_w version),
+        "dTw_dx" [K/m] (proposal metric; ALPEMA sets no limit on it).
         Peaks: "max_R_w", "max_R_end", "max_dT_ss", "max_dT_sm",
-        "max_dT_hour", and "t_max_R_w" (time of the peak wall rate).
+        "max_dT_hour", "max_dTw_dx", and "t_max_R_w" (time of the peak wall
+        rate).
     """
     # 1. R_w = wall_rate(result["dTw_dt"]).
     # 2. R_end = nozzle_rate(result["dTh_dt"], result["dTc_dt"]) unless those
     #    are None (quasi-steady model).
-    # 3. dT_ss = stream_to_stream(T_h, T_c); dT_sm = stream_to_metal(T_h, T_c, T_w).
+    # 3. dT_ss = stream_to_stream(T_h, T_c); dT_sm = stream_to_metal(T_h, T_c, T_w);
+    #    dTw_dx = wall_gradient(T_w, result["x"]).
     # 4. dT_hour from hourly_change on the outlet histories
     #    np.column_stack((T_h[:, -1], T_c[:, 0])), and a second version on T_w
     #    as the math doc writes it.
@@ -274,9 +318,12 @@ def smax(z, omega, axis=None):
     """Smooth maximum (log-sum-exp).
 
     Eq 47: smax_omega(z) = (1/omega) ln sum_k exp(omega z_k), which satisfies
-    max z <= smax <= max z + ln(K)/omega. Used where the location of a max
-    jumps and makes derivatives noisy (sensitivities, the startup
-    optimization), and optionally to smooth the laminar-floor kink.
+    max z <= smax <= max z + ln(K)/omega. Used in the startup-ramp optimization
+    stretch goal (the constraints of Eq 52, where the location of the max jumps
+    between candidate ramps and a plain max would make the optimizer stall),
+    and optionally to smooth the laminar-floor kink in correlations.py. It is
+    defined in math doc Section 7.6; the rest of that sensitivity section is
+    out of scope per the proposal.
 
     Parameters
     ----------

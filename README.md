@@ -3,36 +3,35 @@
 CMU 06-623 (Mathematical Modeling of Chemical Engineering Processes), Fall 2026
 Team: Ryan Kim, Matt Murphy, Calvin Wang
 
-Brazed aluminum plate-fin heat exchangers (BAHX) are the compact cores used in cryogenic gas processing. They are efficient, but they fail by thermal fatigue: fast temperature swings during startup, shutdown or a trip, and large local temperature differences between streams and metal, crack the brazed joints. The ALPEMA Integrity Operating Window (IOW) table sets the guidance operators follow: rates of change below 1 °C/min for frequent events and below 5 °C/min and 60 °C/h for startups, shutdowns and trips, and stream-to-stream and stream-to-metal differences below about 30 °C. This project builds a 1D model of a two-stream counterflow BAHX with offset strip fins (pure methane on both sides, single phase), first at steady state and then in time, so that we can predict whether a given upset stays inside those limits and which design and operating parameters matter most.
+Brazed aluminum plate-fin heat exchangers (BAHX) are the compact cores used in cryogenic gas processing. They are efficient, but they fail by thermal fatigue: fast temperature swings during startup, shutdown or a trip, and large local temperature differences between streams and metal, crack the brazed joints. The ALPEMA Integrity Operating Window (IOW) table sets the guidance operators follow: rates of change below 1 °C/min for frequent events and below 5 °C/min and 60 °C/h for startups, shutdowns and trips, and stream-to-stream and stream-to-metal differences below about 30 °C. This project builds a 1D model of a two-stream counterflow BAHX with offset strip fins (pure methane on both sides, single phase), first at steady state and then in time, to identify the operating conditions that approach those limits during startup and upset conditions.
 
 ## Model overview
 
-- **Steady state:** two coupled energy-balance ODEs with inlet conditions at opposite ends (a boundary value problem), solved with `scipy.integrate.solve_bvp`. It is verified against the analytical ε-NTU solution and cross-checked by shooting.
+- **Steady state (minimum viable product):** two coupled energy-balance ODEs with inlet conditions at opposite ends (a boundary value problem), solved with `scipy.integrate.solve_bvp`. It is verified against the analytical ε-NTU solution and cross-checked by shooting.
 - **Closure relations:** Manglik–Bergles offset-strip-fin correlations for the heat transfer coefficient, plus fin and surface efficiencies. Properties come from CoolProp through smooth polynomial surrogates fitted once, so CoolProp is never called inside an ODE right-hand side.
-- **Transient:** a method-of-lines finite-volume model (hot gas, cold gas and metal in each of N cells) integrated with the stiff solver `solve_ivp(method="BDF")` and a sparse Jacobian pattern. It is run for a feed-temperature ramp and a cold-stream trip, and the results are compared with the ALPEMA limits.
-- **Sensitivity and uncertainty:** normalized sensitivities of duty, peak temperature difference and peak metal rate to flow ratio, fin geometry, ramp rate and the Colburn-factor multiplier. A regression of the Colburn factor gives confidence intervals, which are propagated to the outputs.
+- **Transient (primary extension):** a method-of-lines finite-volume model (hot gas, cold gas and metal in each of N cells) integrated with the stiff solver `solve_ivp(method="BDF")` and a sparse Jacobian pattern, for a feed-temperature ramp and a cold-stream trip. A quasi-steady gas model is the fallback if the full model proves too slow.
+- **Thermal-fatigue metrics:** stream-to-stream and stream-to-metal temperature differences, the peak wall heating rate dT_w/dt and the peak wall gradient dT_w/dx, compared with the ALPEMA limits.
+- **Stretch goals (if time permits):** the fastest admissible startup ramp by constrained optimization, and a first-order thermal stress estimate.
 
-The equations, with numbers we cite in the code, are in [docs/bahx_model_math.tex](docs/bahx_model_math.tex) (PDF alongside). Project rules and physics conventions are in [CLAUDE.md](CLAUDE.md).
+Scope and deliverables follow the submitted proposal, [docs/project_proposal.pdf](docs/project_proposal.pdf). The equations, with numbers we cite in the code, are in [docs/bahx_model_math.tex](docs/bahx_model_math.tex) (PDF alongside). Project rules and physics conventions are in [CLAUDE.md](CLAUDE.md).
 
 ## Repository layout
 
 ```text
 bahx-thermal-model/
-├── docs/                 math formulation (bahx_model_math.tex/.pdf); source of truth for equations
+├── docs/                 math formulation (bahx_model_math.tex/.pdf, source of truth for equations) and the submitted proposal
 ├── src/                  all model code (plain functions on NumPy arrays)
 │   ├── __init__.py       makes src importable as a package
 │   ├── config.py         base-case inputs, scenario settings, numerics and ALPEMA limits (the only place numbers live)
 │   ├── properties.py     CoolProp tables, polynomial property surrogates, range checks
-│   ├── correlations.py   fin geometry, Manglik-Bergles j and f, fin/surface efficiency, side conductances
-│   ├── steady.py         analytical ε-NTU solution, steady BVP (collocation + shooting), duty, sizing
+│   ├── correlations.py   fin geometry, Manglik-Bergles j, fin/surface efficiency, side conductances
+│   ├── steady.py         analytical ε-NTU solution, steady BVP (collocation + shooting), duty and energy closure
 │   ├── transient.py      method-of-lines transient, upset scenarios, discrete steady state, quasi-steady fallback
-│   ├── metrics.py        ALPEMA metrics, grid-convergence order, smooth max, thermal stress
-│   ├── sensitivity.py    finite-difference, implicit and forward sensitivities
-│   └── regression.py     Colburn-factor fit, confidence intervals, uncertainty propagation
+│   └── metrics.py        thermal-fatigue and ALPEMA metrics, grid-convergence order, smooth max, thermal stress
 ├── tests/                pytest verification checks (see CLAUDE.md "Verification")
 ├── notebooks/            analysis notebooks; import from src/ and only make plots
 ├── figures/              saved figures from notebooks
-├── data/                 small input data (e.g. digitized Kays & London j-Re data)
+├── data/                 small input data (e.g. NIST WebBook spot-check values)
 ├── pytest.ini            puts the repo root on sys.path for tests
 ├── requirements.txt      dependencies with minimum versions
 └── CLAUDE.md             project rules, conventions and verification list
@@ -95,7 +94,7 @@ Clear outputs before committing a notebook: `jupyter nbconvert --clear-output --
 
 The function signatures in `src/` are the agreement between teammates. The full details are in each module's docstring.
 
-- **`params`**: one flat dict of every input, `params = dict(config.BASE_CASE)`. To change something for a study, use a copy: `p = sensitivity.with_parameter(params, "b_h", 1.01 * params["b_h"])`. Never edit `config.BASE_CASE` in place. Modules in `src/` never import `config`; callers pass `params` and `config.ALPEMA_LIMITS` in.
+- **`params`**: one flat dict of every input, `params = dict(config.BASE_CASE)`. To change something for a study (a ramp-rate sweep, a grid-convergence run), use a copy: `p = dict(params, ramp_t=600.0)`. Never edit `config.BASE_CASE` in place. Modules in `src/` never import `config`; callers pass `params` and `config.ALPEMA_LIMITS` in.
 - **`scenario`**: a name, `"none"`, `"feed_ramp"` or `"cold_trip"`. The numbers for each scenario live in `params`.
 - **`props`**: `{"h": surrogate, "c": surrogate}` from `properties.build_surrogates(params, scenario)`. It is built once with CoolProp and then passed into the solvers. Rebuild it when a pressure or the temperature range changes.
 - **`geom`**: `{"h": side_geom, "c": side_geom, "A_m": ..., "C_m": ...}` from `correlations.exchanger_geometry(params)`. Public solvers build it themselves from `params`; only right-hand-side functions and helpers take it as an argument.
@@ -112,15 +111,11 @@ Suggested build order:
    Owner: TBD
 2. **`correlations.py`**. Depends on `properties`. Geometry first (`osf_geometry`, `exchanger_geometry`), then `colburn_j`, `heat_transfer_coefficient`, fin efficiency, `side_conductance` and `conductances`.
    Owner: TBD
-3. **`steady.py`**. Depends on `properties` and `correlations`. Analytical functions first (`effectiveness`, `analytical_profiles`), then `steady_rhs`, `solve_steady`, `energy_balance`, then shooting and sizing.
+3. **`steady.py`**. Depends on `properties` and `correlations`. Analytical functions first (`effectiveness`, `analytical_profiles`), then `steady_rhs`, `solve_steady`, `energy_balance`, then shooting (the proposal's root-finding backup and our cross-check on collocation). This is the minimum viable product.
    Owner: TBD
-4. **`transient.py`**. Depends on `properties`, `correlations` and `steady` (initial guess). State packing and the Jacobian pattern first, then `transient_rhs`, `discrete_steady_state` and `simulate`.
+4. **`transient.py`**. Depends on `properties`, `correlations` and `steady` (initial guess). State packing and the Jacobian pattern first, then `transient_rhs`, `discrete_steady_state` and `simulate`; the quasi-steady functions only if the full model is too slow.
    Owner: TBD
 5. **`metrics.py`**. Depends only on numpy/scipy, so it can be written at any time in parallel with the others.
-   Owner: TBD
-6. **`sensitivity.py`**. Depends on `steady`, `transient` and `metrics`. Start after the steady model is verified.
-   Owner: TBD
-7. **`regression.py`**. Depends on `correlations` and a data file in `data/`. It can be written any time after `correlations.py`.
    Owner: TBD
 
 `config.py` is shared: fill in the `TODO` values together before running anything beyond the constant-property tests.
@@ -128,11 +123,10 @@ Owner: TBD
 
 ## Roadmap
 
-- [ ] Steady model + ε-NTU verification (constant properties, including C_r = 1; energy closure; collocation vs shooting)
-- [ ] Property surrogates (CoolProp fits with reported max relative error, single-phase range checks)
-- [ ] Transient model + ALPEMA metrics (feed ramp and cold trip; grid convergence N, 2N, 4N)
-- [ ] Sensitivity analysis (normalized sensitivities, analytical check, ranking)
-- [ ] Colburn-factor regression with confidence intervals and uncertainty propagation
+- [ ] Steady model (minimum viable product) + ε-NTU verification (constant properties, including C_r = 1; energy closure; collocation vs shooting)
+- [ ] Property surrogates (CoolProp fits with reported max relative error, single-phase range checks, NIST spot-checks)
+- [ ] Transient model (primary extension) + thermal-fatigue and ALPEMA metrics (feed ramp and cold trip; grid convergence N, 2N, 4N)
+- [ ] Fallback only if the full transient stalls: quasi-steady gas model, or a parametric sweep of startup ramp rates checked against the ALPEMA limits
 - [ ] Stretch: fastest admissible startup ramp (constrained optimization)
 - [ ] Stretch: thermal stress estimate from the temperature differences
 
@@ -146,3 +140,4 @@ Owner: TBD
 6. ALPEMA, "Integrity Operating Windows for Brazed Aluminium Plate-Fin Heat Exchangers," June 2025. <https://www.alpema.org/pdf/ALPEMA_Integrity_Operating_Window_Table.pdf>
 7. I. H. Bell, J. Wronski, S. Quoilin, and V. Lemort, "Pure and pseudo-pure fluid thermophysical property evaluation and the open-source thermophysical property library CoolProp," *Industrial & Engineering Chemistry Research*, vol. 53, no. 6, pp. 2498–2508, 2014. <https://doi.org/10.1021/ie4033999>
 8. O. Levenspiel, *Chemical Reaction Engineering*, 3rd ed. New York: Wiley, 1999.
+9. P. J. Linstrom and W. G. Mallard, Eds., *NIST Chemistry WebBook*, NIST Standard Reference Database Number 69. Gaithersburg, MD: National Institute of Standards and Technology. <https://doi.org/10.18434/T4D303> (methane property spot-checks)

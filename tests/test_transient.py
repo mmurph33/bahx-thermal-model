@@ -8,15 +8,7 @@ cause instead (CLAUDE.md).
 
 import pytest
 
-from src import (  # noqa: F401  (used once implemented)
-    config,
-    correlations,
-    metrics,
-    properties,
-    sensitivity,
-    steady,
-    transient,
-)
+from src import config, correlations, metrics, properties, steady, transient  # noqa: F401  (used once implemented)
 
 
 def test_transient_stays_at_steady_state():
@@ -66,8 +58,8 @@ def test_transient_relaxes_to_new_steady_state():
     #    on a convergence criterion, not a fixed time: keep extending t_end
     #    (or use a terminal solve_ivp event) until the max |dy/dt| at the
     #    final time is < 1e-6 K/s.
-    # 3. New steady target: p_new = sensitivity.with_parameter(params, "T_h_in",
-    #    params["T_h_in"] + params["ramp_dT"]);
+    # 3. New steady target: p_new = dict(params,
+    #    T_h_in=params["T_h_in"] + params["ramp_dT"]);
     #    y_new = transient.discrete_steady_state(p_new, props, "none").
     #    assert max |y_final - y_new| < 1e-5 K.
     # 4. Against the BVP: for N in (25, 50, 100) compute
@@ -93,8 +85,7 @@ def test_grid_convergence_of_transient_metric():
     #    dense t_eval shared by all runs.
     #    props = properties.build_surrogates(params, "feed_ramp").
     # 2. For N in (N0, 2 N0, 4 N0) with N0 = 25: r_N = transient.simulate(
-    #    sensitivity.with_parameter(params, "N", N), props, "feed_ramp", t_end,
-    #    t_eval=t_eval).
+    #    dict(params, N=N), props, "feed_ramp", t_end, t_eval=t_eval).
     # 3. Smooth metric: hot outlet temperature T_h[:, -1] at a fixed time in
     #    the middle of the ramp (np.interp on t). p_obs, y_star =
     #    metrics.observed_order(y_N, y_2N, y_4N);

@@ -156,7 +156,9 @@ def fit_surrogate(fluid, p, T_lo, T_hi, degree, n_points):
     #    Table = coolprop_table(fluid, p, T_fit).
     # 3. Vandermonde matrix V = np.vander(T~_fit, degree + 1, increasing=True),
     #    shape (n_points, degree + 1). Scaling T~ into [-1, 1] keeps V well
-    #    conditioned; fitting in raw kelvin would not.
+    #    conditioned; fitting in raw kelvin would not. (The proposal names
+    #    numpy.polyfit, which solves the same least-squares problem; if you
+    #    use it, pass the scaled T~, not kelvin.)
     # 4. For each name in ("cp", "mu", "k", "rho"): solve
     #    min ||V c - phi||_2 with np.linalg.lstsq(V, table[name], rcond=None);
     #    c has shape (degree + 1,).
@@ -228,7 +230,7 @@ def build_surrogates(params, scenario="none"):
     # 5. Print or return each surrogate's max_rel_err: CLAUDE.md asks us to
     #    report it.
     # Pitfall: rebuild props whenever a pressure, an inlet temperature or the
-    #    ramp size changes (e.g. inside sensitivity studies). A stale surrogate
+    #    ramp size changes (e.g. inside a sweep of ramp rates). A stale surrogate
     #    either raises out of range or silently uses the wrong pressure.
     # Check: with the base case (6 MPa / 1.5 MPa, 300 K / 235 K) and degree 6,
     #    both sides build and every max_rel_err is below 1e-3.
