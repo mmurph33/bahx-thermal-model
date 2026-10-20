@@ -1,6 +1,9 @@
-numpy
-scipy
-matplotlib
-CoolProp
-jupyter
-pytest
+# Supported Python: 3.11-3.14 (developed on 3.14).
+# Floors are the first releases that ship binary wheels for Python 3.14;
+# all of them also support 3.11-3.13. pip installs the newest compatible versions.
+numpy>=2.3.2
+scipy>=1.16.1
+matplotlib>=3.10.5
+CoolProp>=7.2.0
+jupyter>=1.1.1
+pytest>=8.4

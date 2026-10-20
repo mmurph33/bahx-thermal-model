@@ -218,3 +218,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# Project-specific (BAHX thermal model)
+# ---------------------------------------------------------------------------
+# Virtual environment and caches (also matched by the template entries above)
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+
+# macOS Finder metadata
+.DS_Store
+
+# Personal Claude Code files (shared CLAUDE.md and .claude/settings.json stay tracked)
+CLAUDE.local.md
+.claude/settings.local.json

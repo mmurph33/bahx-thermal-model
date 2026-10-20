@@ -1,0 +1,611 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\NTU}{\mathrm{NTU}}
+\newcommand{\Rey}{\mathrm{Re}}
+\newcommand{\Pran}{\mathrm{Pr}}
+\newcommand{\hin}{_{h,\mathrm{in}}}
+\newcommand{\cin}{_{c,\mathrm{in}}}
+\newcommand{\smax}{\operatorname{smax}}
+
+\setlist{itemsep=2pt,topsep=4pt}
+
+\title{Mathematical Formulation:\\
+Thermal Model of a Counterflow Brazed Aluminum Plate-Fin Heat Exchanger}
+\author{06-623 Course Project}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\noindent This document derives every equation the project needs, in the order the code will be built: the steady boundary value problem (BVP), the closure relations that feed it, its numerical solution and verification, the transient method-of-lines model, sensitivity analysis, regression with uncertainty, and two stretch goals. It is a companion to the proposal, so it is non-binding in the same way.
+
+\tableofcontents
+
+%======================================================================
+\section{Scope and modeling assumptions}
+%======================================================================
+
+The system is a two-stream counterflow brazed aluminum plate-fin heat exchanger (BAHX) with offset strip fins. The base case is a single-phase gas/gas exchanger: warm high-pressure feed gas (hot stream, $h$) is cooled by cold low-pressure residue gas (cold stream, $c$), both treated as pure methane. The hot stream enters at $x=0$ and the cold stream at $x=L$.
+
+\begin{enumerate}[label=\textbf{A\arabic*.}]
+  \item \textbf{Repeating unit.} Hot and cold layers alternate (ABAB stacking), so one repeating unit (one hot passage, one cold passage and the two parting sheets between them) represents the whole core. Flow maldistribution and heat leak to the surroundings are neglected.
+  \item \textbf{One-dimensional.} Each stream temperature is a cross-sectional average that varies only with $x$ (and $t$).
+  \item \textbf{No axial conduction in the fluids} (large P\'eclet number). Axial conduction in the metal is dropped in the steady base model and kept as an optional term in the transient model.
+  \item \textbf{Fins and sheet.} Fins enter through an overall surface efficiency $\eta_o$. Through-thickness resistance of the parting sheet is negligible: $t_w/k_w \sim 10^{-5}\ \si{m^2.K/W}$ for a millimeter-scale aluminum sheet, against $1/h \sim 10^{-3}\ \si{m^2.K/W}$ for gas-side convection.
+  \item \textbf{Pressure.} Pressure enters only through the properties. The base model holds each stream at its inlet pressure; pressure-drop ODEs are added as an extension (Section~\ref{sec:dp}).
+  \item \textbf{Transient mass storage neglected.} In the transient model $\dot m$ is uniform in $x$ at each instant, so only energy storage is tracked.
+\end{enumerate}
+
+%======================================================================
+\section{Nomenclature}
+%======================================================================
+
+\begin{center}
+\small
+\begin{tabular}{>{$}l<{$} p{9.2cm} l}
+\toprule
+\text{Symbol} & Meaning & Units \\
+\midrule
+x,\ L & axial coordinate, core length & m \\
+W & core width & m \\
+T_h,\ T_c,\ T_w & hot stream, cold stream, metal (wall) temperature & K \\
+\dot m_h,\ \dot m_c & mass flow per passage & kg/s \\
+G = \dot m/A_{ff} & mass flux & \si{kg/(m^2.s)} \\
+c_p,\ \hat h,\ \rho,\ \mu,\ k & heat capacity, specific enthalpy, density, viscosity, conductivity & SI \\
+s,\ b,\ t,\ l & fin clear spacing, clear fin height, fin thickness, strip length & m \\
+t_w & parting sheet thickness & m \\
+n = 1/(s+t) & fins per unit width & \si{m^{-1}} \\
+A_{ff},\ A',\ A_m & free-flow area, heat transfer area per unit length, metal cross-section & \si{m^2}, m, \si{m^2} \\
+h & convective heat transfer coefficient & \si{W/(m^2.K)} \\
+\eta_f,\ \eta_o & fin efficiency, overall surface efficiency & -- \\
+a = \eta_o h A' & side conductance per unit length & \si{W/(m.K)} \\
+U' & overall conductance per unit length & \si{W/(m.K)} \\
+C = \dot m c_p & heat capacity rate & W/K \\
+C'_m = \rho_m c_m A_m & metal heat capacity per unit length & \si{J/(m.K)} \\
+j,\ f & Colburn factor, Fanning friction factor & -- \\
+\NTU,\ C_r,\ \varepsilon & number of transfer units, capacity ratio, effectiveness & -- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{Steady-state model}
+%======================================================================
+
+\subsection{Control-volume energy balances}
+
+Take a slice $[x, x+\dd x]$ of the repeating unit. The hot stream flows in $+x$ and loses heat to the metal:
+\begin{equation}
+  \dot m_h \frac{\dd \hat h_h}{\dd x} = \dot m_h\, c_{p,h}(T_h)\,\frac{\dd T_h}{\dd x} = -a_h\,(T_h - T_w).
+  \label{eq:hot}
+\end{equation}
+The cold stream flows in $-x$: it enters the slice at $x+\dd x$ and leaves at $x$, so the balance $\dot m_c \hat h_c(x+\dd x) + q'_c\,\dd x = \dot m_c \hat h_c(x)$ gives
+\begin{equation}
+  \dot m_c\, c_{p,c}(T_c)\,\frac{\dd T_c}{\dd x} = -a_c\,(T_w - T_c).
+  \label{eq:cold}
+\end{equation}
+Both right-hand sides are negative in normal operation, so both temperatures fall with $x$, as they should in counterflow. With no storage and no axial conduction, the metal passes on all the heat it receives:
+\begin{equation}
+  0 = a_h (T_h - T_w) - a_c (T_w - T_c).
+  \label{eq:wall_ss}
+\end{equation}
+
+\subsection{Eliminating the wall temperature}
+
+Equation~\eqref{eq:wall_ss} is linear in $T_w$:
+\begin{equation}
+  T_w = \frac{a_h T_h + a_c T_c}{a_h + a_c},
+  \qquad
+  q' = U'(T_h - T_c),
+  \qquad
+  \frac{1}{U'} = \frac{1}{a_h} + \frac{1}{a_c}.
+  \label{eq:Tw}
+\end{equation}
+The two stream-to-metal differences, which ALPEMA limits along with the stream-to-stream difference, follow directly:
+\begin{equation}
+  T_h - T_w = \frac{a_c}{a_h + a_c}\,(T_h - T_c),
+  \qquad
+  T_w - T_c = \frac{a_h}{a_h + a_c}\,(T_h - T_c).
+  \label{eq:sm}
+\end{equation}
+The steady model is therefore two coupled first-order ODEs:
+\begin{equation}
+  \frac{\dd T_h}{\dd x} = -\frac{U'(T_h,T_c)\,(T_h - T_c)}{\dot m_h c_{p,h}(T_h)},
+  \qquad
+  \frac{\dd T_c}{\dd x} = -\frac{U'(T_h,T_c)\,(T_h - T_c)}{\dot m_c c_{p,c}(T_c)}.
+  \label{eq:ode_ss}
+\end{equation}
+$U'$ depends on temperature because $h$ depends on $\mu$, $k$ and $c_p$ (Section~\ref{sec:closure}).
+
+\subsection{Why this is a boundary value problem}
+
+The known inlet temperatures sit at opposite ends:
+\begin{equation}
+  T_h(0) = T\hin, \qquad T_c(L) = T\cin.
+  \label{eq:bc}
+\end{equation}
+Writing $\bm y = [T_h,\ T_c]^\top$, the problem is $\bm y' = \bm F(x,\bm y)$ with boundary residual
+\begin{equation}
+  \bm g\big(\bm y(0), \bm y(L)\big) =
+  \begin{bmatrix} T_h(0) - T\hin \\ T_c(L) - T\cin \end{bmatrix} = \bm 0 .
+\end{equation}
+No single end has both values, so the problem cannot be marched as an initial value problem. It is solved with collocation (\texttt{solve\_bvp}) and cross-checked by shooting (Section~\ref{sec:bvp_num}).
+
+\subsection{Dimensionless form}
+
+Define $\xi = x/L$ and $\theta = (T - T\cin)/(T\hin - T\cin)$, so $\theta \in [0,1]$. With constant properties,
+\begin{equation}
+  \frac{\dd\theta_h}{\dd\xi} = -\NTU_h(\theta_h - \theta_c),
+  \qquad
+  \frac{\dd\theta_c}{\dd\xi} = -\NTU_c(\theta_h - \theta_c),
+  \qquad
+  \theta_h(0)=1,\ \ \theta_c(1)=0,
+  \label{eq:dimless}
+\end{equation}
+where $\NTU_h = U'L/C_h$ and $\NTU_c = U'L/C_c$. Only two groups matter: $\NTU = U'L/C_{\min}$ and $C_r = C_{\min}/C_{\max}$.
+
+\subsection{Constant-property analytical solution (verification case)}
+\label{sec:analytic}
+
+Take the hot stream as $C_{\min}$, so $\NTU_h = \NTU$ and $\NTU_c = C_r\NTU$. Subtracting the two equations in \eqref{eq:dimless} gives one ODE for the local difference $\Delta = \theta_h - \theta_c$:
+\begin{equation}
+  \frac{\dd\Delta}{\dd\xi} = -\NTU(1 - C_r)\,\Delta
+  \quad\Longrightarrow\quad
+  \Delta(\xi) = \Delta_0\, e^{-\NTU(1-C_r)\xi}.
+\end{equation}
+Integrating the hot equation,
+\begin{equation}
+  \theta_h(\xi) = 1 - \frac{\Delta_0}{1 - C_r}\left[1 - e^{-\NTU(1-C_r)\xi}\right],
+  \qquad
+  \theta_c(\xi) = \theta_h(\xi) - \Delta(\xi).
+  \label{eq:profiles}
+\end{equation}
+Let $E = e^{-\NTU(1-C_r)}$. The cold-end condition $\theta_c(1) = 0$ means $\theta_h(1) = \Delta(1) = \Delta_0 E$, which fixes the warm-end difference:
+\begin{equation}
+  \Delta_0 = \frac{1 - C_r}{1 - C_r E}.
+\end{equation}
+The effectiveness is then the standard counterflow result,
+\begin{equation}
+  \varepsilon = 1 - \theta_h(1) = \frac{1 - E}{1 - C_r E}
+             = \frac{1 - e^{-\NTU(1-C_r)}}{1 - C_r\, e^{-\NTU(1-C_r)}},
+  \label{eq:eps}
+\end{equation}
+and since $\Delta$ is monotone, the largest steady stream-to-stream difference is at the warm end,
+\begin{equation}
+  \max_x (T_h - T_c) = \Delta_0\,(T\hin - T\cin) = \frac{1 - C_r}{1 - C_r E}\,(T\hin - T\cin).
+  \label{eq:dTmax}
+\end{equation}
+For balanced flow ($C_r = 1$), $\Delta$ is constant, both profiles are linear, $\Delta_0 = 1/(1+\NTU)$ and $\varepsilon = \NTU/(1+\NTU)$. If the cold stream is $C_{\min}$ the same algebra applies with the roles swapped, and \eqref{eq:eps} still holds with $\NTU = U'L/C_{\min}$.
+
+These closed forms serve three purposes: they verify the numerical BVP in the constant-property limit, they give the initial guess for \texttt{solve\_bvp}, and they give exact derivatives to check the sensitivity code (Section~\ref{sec:sens}).
+
+\subsection{Pressure-drop extension}
+\label{sec:dp}
+
+With the Fanning friction factor $f$ and acceleration neglected, $\Delta p = 4f(L/D_h)\,G^2/(2\rho)$ in differential form gives
+\begin{equation}
+  \frac{\dd p_h}{\dd x} = -\frac{2 f_h G_h^2}{\rho_h D_{h,h}},
+  \qquad
+  \frac{\dd p_c}{\dd x} = +\frac{2 f_c G_c^2}{\rho_c D_{h,c}},
+  \qquad
+  p_h(0) = p\hin,\ \ p_c(L) = p\cin .
+\end{equation}
+The sign on the cold equation is positive because the cold stream loses pressure as it moves toward $x = 0$. Adding these turns the BVP into four ODEs with the same split-boundary structure, and the properties become functions of $(T,p)$.
+
+\subsection{Heat duty and energy closure}
+
+The duty can be computed three independent ways, and their agreement is a key verification check:
+\begin{equation}
+  Q = \dot m_h\big[\hat h_h(T\hin) - \hat h_h(T_h(L))\big]
+    = \dot m_c\big[\hat h_c(T_c(0)) - \hat h_c(T\cin)\big]
+    = \int_0^L U'\,(T_h - T_c)\,\dd x .
+  \label{eq:Q}
+\end{equation}
+The integral is evaluated by quadrature on the dense \texttt{solve\_bvp} solution. We will report the relative closure error $|Q_h - Q_c|/Q$.
+
+%======================================================================
+\section{Closure relations}
+\label{sec:closure}
+%======================================================================
+
+\subsection{Offset strip fin geometry}
+
+For a passage with clear fin spacing $s$, clear fin height $b$ (plate spacing $b+t$), fin thickness $t$ and strip length $l$, the dimensionless ratios and hydraulic diameter of Manglik and Bergles~\cite{manglik1995} are
+\begin{equation}
+  \alpha = \frac{s}{b}, \qquad \delta = \frac{t}{l}, \qquad \gamma = \frac{t}{s},
+  \qquad
+  D_h = \frac{4\, s\, b\, l}{2(s l + b l + t b) + t s}.
+\end{equation}
+(The original paper uses $h$ for fin height; we use $b$ to avoid a clash with the heat transfer coefficient.) Per passage and per unit core width $W$, neglecting strip-edge and corner corrections,
+\begin{equation}
+  A_{ff} = W n s b, \qquad
+  A'_p = 2W(1 - n t), \qquad
+  A'_f = 2 W n b, \qquad
+  A' = A'_p + A'_f,
+\end{equation}
+where the factor 2 counts both parting sheets bounding the passage. The metal cross-section of one repeating unit is approximately $A_m = W\left[\,2t_w + n_h t_h b_h + n_c t_c b_c\,\right]$.
+
+\subsection{Heat transfer and friction correlations}
+
+With $\Rey = G D_h/\mu$, Manglik and Bergles~\cite{manglik1995} correlate both factors over laminar, transition and turbulent flow:
+\begin{align}
+  j &= 0.6522\,\Rey^{-0.5403}\,\alpha^{-0.1541}\,\delta^{0.1499}\,\gamma^{-0.0678}
+       \left[1 + 5.269\times10^{-5}\,\Rey^{1.340}\,\alpha^{0.504}\,\delta^{0.456}\,\gamma^{-1.055}\right]^{0.1},
+  \label{eq:mb_j}\\
+  f &= 9.6243\,\Rey^{-0.7422}\,\alpha^{-0.1856}\,\delta^{0.3053}\,\gamma^{-0.2659}
+       \left[1 + 7.669\times10^{-8}\,\Rey^{4.429}\,\alpha^{0.920}\,\delta^{3.767}\,\gamma^{0.236}\right]^{0.1}.
+  \label{eq:mb_f}
+\end{align}
+These coefficients will be checked against the original paper before use, along with its stated range of validity. The Colburn factor gives the coefficient through $j = \mathrm{St}\,\Pran^{2/3}$:
+\begin{equation}
+  h = j\, G\, c_p\, \Pran^{-2/3}, \qquad \Pran = \frac{c_p \mu}{k}.
+\end{equation}
+
+\subsection{Fin and surface efficiency}
+
+A fin spanning between two parting sheets at nearly the same temperature behaves as two fins of length $\ell_f \approx b/2$ with an adiabatic midplane. Following Shah and Sekuli\'c~\cite{shah2003}, the strip-edge correction enters through $m$:
+\begin{equation}
+  m = \left[\frac{2h}{k_f t}\left(1 + \frac{t}{l}\right)\right]^{1/2},
+  \qquad
+  \eta_f = \frac{\tanh(m \ell_f)}{m \ell_f},
+  \qquad
+  \eta_o = 1 - \frac{A'_f}{A'}\,(1 - \eta_f).
+\end{equation}
+Then $a = \eta_o h A'$ on each side. Because $h$ depends on local properties, $a_h$ and $a_c$ are re-evaluated at every collocation point; this is where the model becomes nonlinear.
+
+\subsection{Thermophysical properties}
+
+Properties $c_p,\ \mu,\ k,\ \rho,\ \hat h$ come from CoolProp~\cite{coolprop2014} as functions of $(T,p)$. Calling CoolProp inside the ODE right-hand side is slow and blocks automatic differentiation, so we will replace it with smooth surrogates over the operating range (Section~\ref{sec:propfit}). High-pressure methane has a sharp $c_p$ peak near its pseudo-critical temperature; the base-case temperatures will be chosen to stay clear of it, and the surrogate error will be checked there explicitly.
+
+%======================================================================
+\section{Numerical solution of the steady problem}
+\label{sec:bvp_num}
+%======================================================================
+
+\subsection{Collocation with continuation}
+
+\texttt{solve\_bvp} solves \eqref{eq:ode_ss} and \eqref{eq:bc} by collocation on an adaptive mesh. The initial guess is the analytical profile \eqref{eq:profiles} evaluated with mean properties. If the full variable-property problem fails to converge from that guess, we use parameter continuation: define
+\begin{equation}
+  \phi(T;\lambda) = (1-\lambda)\,\bar\phi + \lambda\,\phi(T), \qquad \phi \in \{c_p, \mu, k\},
+\end{equation}
+and solve a sequence $\lambda = 0, 0.25, 0.5, 0.75, 1$, using each converged solution as the guess for the next. At $\lambda = 0$ the problem is the constant-property one, which converges trivially.
+
+\subsection{Shooting as a cross-check}
+
+Let $\sigma = T_c(0)$ (the unknown cold outlet). For a trial $\sigma$, integrate \eqref{eq:ode_ss} from $x=0$ to $L$ with \texttt{solve\_ivp} and define the scalar residual
+\begin{equation}
+  r(\sigma) = T_c(L;\sigma) - T\cin = 0 .
+\end{equation}
+The root is bracketed by $T\cin < \sigma < T\hin$, so \texttt{brentq} (or \texttt{fsolve}) is reliable. At large $\NTU(1-C_r)$ the map $\sigma \mapsto T_c(L)$ becomes very sensitive, which is the classic weakness of shooting and the reason collocation is the primary method.
+
+\subsection{Sizing by root finding}
+
+To find the length that delivers a target duty $Q^*$, solve
+\begin{equation}
+  g(L) = Q(L) - Q^* = 0,
+\end{equation}
+where each evaluation of $Q(L)$ is a full BVP solve. $Q$ increases monotonically with $L$, so a bracketing method works. The constant-property inverse of \eqref{eq:eps} gives the starting bracket:
+\begin{equation}
+  \NTU = \frac{1}{1 - C_r}\,\ln\!\frac{1 - C_r\varepsilon}{1 - \varepsilon},
+  \qquad
+  L_0 = \frac{\NTU\, C_{\min}}{U'} .
+\end{equation}
+
+\subsection{Verification checklist}
+
+\begin{enumerate}
+  \item Constant properties: numerical $\varepsilon$ and profiles match \eqref{eq:eps} and \eqref{eq:profiles} to solver tolerance, including $C_r = 1$.
+  \item Energy closure: the three duty expressions in \eqref{eq:Q} agree.
+  \item Collocation and shooting agree for the variable-property case.
+  \item The transient model (Section~\ref{sec:transient}) relaxes to the same steady solution.
+\end{enumerate}
+
+%======================================================================
+\section{Transient model}
+\label{sec:transient}
+%======================================================================
+
+\subsection{Governing equations}
+
+Adding accumulation to \eqref{eq:hot}, \eqref{eq:cold} and \eqref{eq:wall_ss}, at constant pressure ($\rho\,\partial\hat h/\partial t = \rho c_p\,\partial T/\partial t$) and with optional axial conduction in the metal:
+\begin{align}
+  \rho_h A_{ff,h} c_{p,h}\,\frac{\partial T_h}{\partial t} + \dot m_h c_{p,h}\,\frac{\partial T_h}{\partial x}
+     &= -a_h (T_h - T_w), \label{eq:pde_h}\\
+  \rho_c A_{ff,c} c_{p,c}\,\frac{\partial T_c}{\partial t} - \dot m_c c_{p,c}\,\frac{\partial T_c}{\partial x}
+     &= a_c (T_w - T_c), \label{eq:pde_c}\\
+  C'_m\,\frac{\partial T_w}{\partial t}
+     &= k_m A_m\,\frac{\partial^2 T_w}{\partial x^2} + a_h (T_h - T_w) - a_c (T_w - T_c). \label{eq:pde_w}
+\end{align}
+Boundary conditions are $T_h(0,t) = T\hin(t)$, $T_c(L,t) = T\cin(t)$ and $\partial T_w/\partial x = 0$ at both ends. The initial condition is the steady BVP solution at the starting operating point.
+
+\subsection{Time scales and stiffness}
+
+Four time scales characterize the system:
+\begin{equation}
+  \tau_{\mathrm{res}} = \frac{\rho A_{ff} L}{\dot m},
+  \qquad
+  \tau_g = \frac{\rho A_{ff} c_p}{a},
+  \qquad
+  \tau_m = \frac{C'_m}{a_h + a_c},
+  \qquad
+  \kappa = \frac{C'_m}{(\rho A_{ff} c_p)_h + (\rho A_{ff} c_p)_c}.
+\end{equation}
+$\tau_{\mathrm{res}}$ is the gas residence time, $\tau_g$ the time for gas to equilibrate with the local metal, $\tau_m$ the local metal relaxation time, and $\kappa$ the metal-to-gas heat capacity ratio. For one stream exchanging with metal at local equilibrium, a temperature front moves at $u_f = u/(1 + C'_m/\rho A_{ff} c_p)$, so the exchanger as a whole responds over a time of order $(1+\kappa)\,\tau_{\mathrm{res}}$ or longer. After discretization into $N$ cells, the fastest scale is $\min(\tau_{\mathrm{res}}/N,\ \tau_g)$. The stiffness ratio is therefore at least
+\begin{equation}
+  S \gtrsim N(1 + \kappa),
+\end{equation}
+which is of order $10^3$ for $N = 100$ and $\kappa$ of order 10. An explicit method would be held to $\Delta t \lesssim \min(\Delta x/u,\ \tau_g)$ for the whole simulated upset, so we use an implicit method (BDF or Radau). The base-case value of $\kappa$ will be computed in week 1.
+
+\subsection{Method of lines: finite-volume discretization}
+
+Divide $[0,L]$ into $N$ cells of width $\Delta x = L/N$ and define the cell heat capacities
+\begin{equation*}
+  M_{h,i} = \rho_{h,i} A_{ff,h} c_{p,h,i}\,\Delta x, \qquad
+  M_{c,i} = \rho_{c,i} A_{ff,c} c_{p,c,i}\,\Delta x, \qquad
+  M_w = C'_m\,\Delta x .
+\end{equation*}
+Using upwind (donor-cell) face values and writing the advective flux in enthalpy form, which conserves energy exactly even with variable $c_p$:
+\begin{align}
+  M_{h,i}\,\frac{\dd T_{h,i}}{\dd t}
+    &= \dot m_h\big[\hat h_h(T_{h,i-1}) - \hat h_h(T_{h,i})\big] - a_{h,i}\Delta x\,(T_{h,i} - T_{w,i}), \label{eq:mol_h}\\
+  M_{c,i}\,\frac{\dd T_{c,i}}{\dd t}
+    &= \dot m_c\big[\hat h_c(T_{c,i+1}) - \hat h_c(T_{c,i})\big] + a_{c,i}\Delta x\,(T_{w,i} - T_{c,i}), \label{eq:mol_c}\\
+  M_w\,\frac{\dd T_{w,i}}{\dd t}
+    &= \frac{k_m A_m}{\Delta x}\big(T_{w,i+1} - 2T_{w,i} + T_{w,i-1}\big) \nonumber\\
+    &\qquad + a_{h,i}\Delta x\,(T_{h,i} - T_{w,i}) - a_{c,i}\Delta x\,(T_{w,i} - T_{c,i}), \label{eq:mol_w}
+\end{align}
+for $i = 1,\dots,N$. The inlet conditions enter as $T_{h,0} = T\hin(t)$ and $T_{c,N+1} = T\cin(t)$, and the adiabatic ends as ghost values $T_{w,0} = T_{w,1}$ and $T_{w,N+1} = T_{w,N}$. This is $3N$ first-order ODEs, $\dot{\bm y} = \bm F(t, \bm y)$.
+
+\paragraph{Ordering and sparsity.} Ordering the state cell by cell,
+\begin{equation*}
+  \bm y = [\,T_{h,1},\ T_{c,1},\ T_{w,1},\ \dots,\ T_{h,N},\ T_{c,N},\ T_{w,N}\,]^\top,
+\end{equation*}
+makes the Jacobian banded: each equation touches only its own cell and one neighbor. Passing this pattern to \texttt{solve\_ivp} through \texttt{jac\_sparsity} keeps the implicit solve cheap.
+
+\paragraph{Numerical diffusion.} The upwind scheme is first-order accurate and smears thermal fronts with an artificial diffusivity of roughly $u\Delta x/2$. There is a direct chemical engineering interpretation: each cell is a well-mixed tank, so the discretized stream is $N$ tanks in series, which has the same spread as an axial-dispersion model with P\'eclet number $\approx 2N$~\cite{levenspiel1999}. Smearing lowers the predicted peak $\partial T_w/\partial t$, so a coarse grid errs on the unsafe side of an ALPEMA check. Grid convergence is therefore required, not optional: for any output $y$, compute $y_N, y_{2N}, y_{4N}$ and the observed order
+\begin{equation}
+  p_{\mathrm{obs}} = \frac{\ln\!\big(|y_N - y_{2N}| / |y_{2N} - y_{4N}|\big)}{\ln 2},
+  \qquad
+  y^\star \approx y_{4N} + \frac{y_{4N} - y_{2N}}{2^{p_{\mathrm{obs}}} - 1},
+\end{equation}
+expecting $p_{\mathrm{obs}} \approx 1$, and report the Richardson-extrapolated $y^\star$.
+
+\subsection{Quasi-steady gas reduction (fallback)}
+
+When $\kappa \gg 1$ the gas holds little energy compared with the metal, and the gas accumulation terms can be dropped. For a known wall profile the gas equations then decouple: each is a linear first-order ODE with a known source, so no BVP is needed. With properties frozen within a cell, the exact cell update is
+\begin{equation}
+  T_{h,i} = T_{w,i} + (T_{h,i-1} - T_{w,i})\, e^{-a_{h,i}\Delta x/(\dot m_h c_{p,h,i})},
+  \qquad
+  T_{c,i} = T_{w,i} + (T_{c,i+1} - T_{w,i})\, e^{-a_{c,i}\Delta x/(\dot m_c c_{p,c,i})},
+\end{equation}
+swept $i = 1 \to N$ for the hot stream and $i = N \to 1$ for the cold stream. The heat delivered to the metal in cell $i$ is $\dot m_h c_{p,h}(T_{h,i-1} - T_{h,i}) + \dot m_c c_{p,c}(T_{c,i+1} - T_{c,i})$, and only the $N$ wall temperatures are integrated in time. Comparing this reduced model with the full $3N$ model quantifies how good the assumption is.
+
+\subsection{Upset scenarios}
+
+\paragraph{Feed temperature ramp.} The hot inlet rises by $\Delta T_r$ over time $t_r$ (ramp rate $r = \Delta T_r / t_r$):
+\begin{equation}
+  T\hin(t) = T_{h,\mathrm{in},0} + \Delta T_r\,\psi(t/t_r),
+\end{equation}
+where $\psi$ is a smoothed unit ramp (smooth corners help the implicit solver).
+
+\paragraph{Cold-stream trip.} The cold flow decays as a valve closes with time constant $\tau_v$, to a small residual fraction $\varphi$:
+\begin{equation}
+  \dot m_c(t) = \dot m_{c,0}\left[\varphi + (1 - \varphi)\, e^{-t/\tau_v}\right].
+\end{equation}
+At low flow the cold-side $\Rey$ leaves the correlation's range, so we bound $h_c$ from below by the fully developed laminar value for a rectangular duct of aspect ratio $\alpha$: $h_c = \max\!\big(h_{\mathrm{corr}},\ \mathrm{Nu}_{\mathrm{fd}}(\alpha)\, k/D_h\big)$.
+
+\subsection{ALPEMA comparison metrics}
+
+From the solution we extract, as functions of time:
+\begin{align}
+  R_w(t) &= \max_i \left|\frac{\dd T_{w,i}}{\dd t}\right| \times \SI{60}{s/min},
+  \qquad
+  R_{\mathrm{end}}(t) = \max\left(\left|\frac{\dd T_{h,N}}{\dd t}\right|, \left|\frac{\dd T_{c,1}}{\dd t}\right|\right) \times \SI{60}{s/min}, \\
+  \Delta T_{ss}(t) &= \max_i |T_{h,i} - T_{c,i}|,
+  \qquad
+  \Delta T_{sm}(t) = \max_i \max\big(|T_{h,i} - T_{w,i}|,\ |T_{w,i} - T_{c,i}|\big).
+\end{align}
+The rates come straight from the right-hand side $\bm F(t,\bm y)$ at the saved times, so no numerical differentiation of the solution is needed. $R_{\mathrm{end}}$ matters because ALPEMA's operating windows are monitored near the nozzles. The limits from the ALPEMA operating-window table~\cite{alpema2025} are: rates below \SI{1}{\celsius/min} for frequent events; below \SI{5}{\celsius/min} and \SI{60}{\celsius/h} for startups, shutdowns and trips; and stream-to-stream and stream-to-metal differences below about \SI{30}{\celsius}. The hourly limit is checked with the 60-minute window $\max_i |T_{w,i}(t) - T_{w,i}(t - \SI{3600}{s})|$.
+
+%======================================================================
+\section{Sensitivity analysis}
+\label{sec:sens}
+%======================================================================
+
+\subsection{Definitions}
+
+For an output $y$ (duty, $\max \Delta T_{ss}$, $\max_t R_w$) and parameter $p$ (flow ratio, fin height, ramp rate, $j$ multiplier), the local sensitivity and the dimensionless (normalized) sensitivity are
+\begin{equation}
+  S_{y,p} = \frac{\partial y}{\partial p},
+  \qquad
+  \tilde S_{y,p} = \frac{p}{y}\,\frac{\partial y}{\partial p},
+\end{equation}
+and the parameters are ranked by $|\tilde S|$: a value of 0.5 means a 1\% change in $p$ moves $y$ by 0.5\%.
+
+\subsection{Analytical check}
+
+Differentiating \eqref{eq:eps} with $\dd E/\dd\NTU = -(1-C_r)E$ gives
+\begin{equation}
+  \frac{\partial\varepsilon}{\partial\NTU} = \frac{(1 - C_r)^2\, E}{(1 - C_r E)^2},
+  \qquad
+  \lim_{C_r\to 1}\frac{\partial\varepsilon}{\partial\NTU} = \frac{1}{(1 + \NTU)^2}.
+\end{equation}
+Geometry enters through the chain rule, for example
+\begin{equation}
+  \frac{\partial\varepsilon}{\partial b} = \frac{\partial\varepsilon}{\partial\NTU}\cdot\frac{L}{C_{\min}}\cdot\frac{\partial U'}{\partial b},
+  \qquad
+  \frac{\partial U'}{\partial b} = U'^2\left(\frac{1}{a_h^2}\frac{\partial a_h}{\partial b} + \frac{1}{a_c^2}\frac{\partial a_c}{\partial b}\right),
+\end{equation}
+where $\partial a/\partial b$ collects the effects of $b$ on $D_h$, $\Rey$, $j$, $\eta_f$ and $A'$. In the constant-property case these exact derivatives test the numerical sensitivity code.
+
+\subsection{Finite differences}
+
+The central difference
+\begin{equation}
+  S_{y,p} \approx \frac{y(p + \Delta p) - y(p - \Delta p)}{2\Delta p}
+\end{equation}
+has truncation error $O(\Delta p^2)$ and round-off error $O(\eta/\Delta p)$, where $\eta$ is the solver's relative tolerance. Balancing the two gives $\Delta p/p \sim \eta^{1/3}$, so the solver tolerance must be tightened (for example $\texttt{rtol} = 10^{-8}$) whenever outputs are differenced.
+
+\subsection{Implicit differentiation through the shooting residual}
+
+At the converged shooting solution $r(\sigma, p) = 0$, so the implicit function theorem gives the sensitivity of the cold outlet without re-solving:
+\begin{equation}
+  \frac{\dd\sigma}{\dd p} = -\frac{\partial r/\partial p}{\partial r/\partial\sigma}.
+\end{equation}
+
+\subsection{Forward sensitivity equations (transient)}
+
+For $\dot{\bm y} = \bm F(\bm y, p)$, the sensitivity $\bm s = \partial\bm y/\partial p$ satisfies
+\begin{equation}
+  \dot{\bm s} = \frac{\partial\bm F}{\partial\bm y}\,\bm s + \frac{\partial\bm F}{\partial p},
+  \qquad
+  \bm s(0) = \frac{\partial\bm y_0}{\partial p},
+\end{equation}
+where $\bm s(0)$ comes from the steady sensitivities. Integrating $[\bm y;\ \bm s]$ together avoids differencing two stiff solutions. If the right-hand side is written in \texttt{jax.numpy}, the Jacobian-vector products can come from automatic differentiation instead of being coded by hand.
+
+\subsection{Smoothing the max operator}
+
+Outputs such as $\max_{i,t} R_w$ are not differentiable where the location of the maximum jumps. Where this causes noisy derivatives we replace the max over values $z_1,\dots,z_K$ with
+\begin{equation}
+  \smax_\omega(\bm z) = \frac{1}{\omega}\ln\sum_{k=1}^{K} e^{\omega z_k},
+  \qquad
+  \max_k z_k \le \smax_\omega(\bm z) \le \max_k z_k + \frac{\ln K}{\omega},
+\end{equation}
+which is smooth and slightly conservative.
+
+%======================================================================
+\section{Regression and uncertainty}
+%======================================================================
+
+\subsection{Fitting the Colburn factor}
+
+For one Kays and London~\cite{kays1984} offset strip fin surface, the geometry is fixed, so the Manglik and Bergles form collapses to four parameters:
+\begin{equation}
+  \ln j(\Rey;\bm\beta) = \ln\beta_1 + \beta_2\ln\Rey + 0.1\,\ln\!\left(1 + \beta_3\,\Rey^{\beta_4}\right).
+\end{equation}
+Given data $(\Rey_i, j_i)$, $i = 1,\dots,n_d$, we minimize the sum of squared log residuals,
+\begin{equation}
+  \hat{\bm\beta} = \arg\min_{\bm\beta}\ \sum_{i=1}^{n_d}\Big[\ln j_i - \ln j(\Rey_i;\bm\beta)\Big]^2,
+\end{equation}
+because the data span decades in $\Rey$ and the scatter is roughly proportional to $j$. The Manglik and Bergles coefficients evaluated at the surface's $(\alpha,\delta,\gamma)$ give a physically grounded starting guess: $\beta_1 = 0.6522\,\alpha^{-0.1541}\delta^{0.1499}\gamma^{-0.0678}$, $\beta_2 = -0.5403$, $\beta_3 = 5.269\times10^{-5}\,\alpha^{0.504}\delta^{0.456}\gamma^{-1.055}$, $\beta_4 = 1.340$.
+
+\subsection{Parameter confidence intervals}
+
+With $\bm J$ the $n_d \times n_\beta$ Jacobian of the log model at $\hat{\bm\beta}$ and $n_\beta = 4$,
+\begin{equation}
+  s^2 = \frac{\mathrm{SSE}}{n_d - n_\beta},
+  \qquad
+  \bm C_\beta \approx s^2\left(\bm J^\top\bm J\right)^{-1},
+  \qquad
+  \hat\beta_k \pm t_{n_d - n_\beta}^{0.975}\sqrt{(\bm C_\beta)_{kk}} .
+\end{equation}
+If $\bm J^\top\bm J$ is ill-conditioned (likely when few points lie in the transition region, making $\beta_3$ and $\beta_4$ hard to separate), we fix $\beta_4$ at its Manglik and Bergles value or fit a two-parameter power law within one regime, which is linear regression in $(\ln\Rey, \ln j)$.
+
+\subsection{Propagating uncertainty to model outputs}
+
+Two approaches, used as checks on each other:
+\begin{enumerate}
+  \item \textbf{Delta method:} $\operatorname{Var}[y] \approx \nabla_{\bm\beta}y^\top\,\bm C_\beta\,\nabla_{\bm\beta}y$, with $\nabla_{\bm\beta}y$ from the sensitivity machinery of Section~\ref{sec:sens}.
+  \item \textbf{Monte Carlo:} sample $\bm\beta^{(m)} \sim \mathcal N(\hat{\bm\beta}, \bm C_\beta)$ for $m = 1,\dots,M$ (a few hundred), rerun the model, and report the 2.5th and 97.5th percentiles of each output.
+\end{enumerate}
+This captures only the fit uncertainty for one surface. The scatter of the general correlation around other surfaces is a separate model uncertainty, handled by a multiplier $j \to \zeta j$ whose sensitivity is reported alongside.
+
+\subsection{Property surrogates}
+\label{sec:propfit}
+
+At fixed pressure, each property is fit as a polynomial in scaled temperature $\tilde T = (T - \bar T)/\Delta T$ (scaling keeps the problem well conditioned):
+\begin{equation}
+  \phi(T) \approx \sum_{k=0}^{K} c_k\,\tilde T^{\,k},
+  \qquad
+  \bm c = \arg\min\ \|\bm V\bm c - \bm\phi\|_2^2,
+\end{equation}
+where $\bm V$ is the Vandermonde matrix of CoolProp sample points. This is linear least squares (\texttt{numpy.linalg.lstsq}). If a low-order polynomial cannot meet a target maximum relative error near the $c_p$ peak, a cubic spline interpolant of the CoolProp table is used instead.
+
+%======================================================================
+\section{Stretch goals}
+%======================================================================
+
+\subsection{Fastest admissible startup ramp}
+
+Split the startup temperature change into $K$ segments with ramp rates $r_1,\dots,r_K$ and solve
+\begin{equation}
+  \min_{\bm r}\ \sum_{k=1}^{K}\frac{\Delta T_k}{r_k}
+  \quad\text{s.t.}\quad
+  \smax_\omega\!\big(R_w(\bm r)\big) \le R_{\lim},
+  \qquad
+  \smax_\omega\!\big(\Delta T_{sm}(\bm r)\big) \le \SI{30}{\celsius},
+  \qquad
+  r_k \ge r_{\min},
+\end{equation}
+with \texttt{scipy.optimize.minimize} (SLSQP). Each constraint evaluation is a transient simulation. For a single ramp ($K = 1$) the peak rate rises monotonically with $r$, so the answer reduces to a root-finding problem, $R_w(r) = R_{\lim}$.
+
+\subsection{Thermal stress estimate}
+
+For a plate fully restrained in both in-plane directions, a temperature difference $\Delta T$ produces
+\begin{equation}
+  \sigma_{\mathrm{th}} \approx \frac{E\,\alpha_T\,\Delta T}{1 - \nu}.
+\end{equation}
+With approximate aluminum values ($E \approx \SI{70}{GPa}$, $\alpha_T \approx \SI{23e-6}{K^{-1}}$, $\nu \approx 0.33$), this is roughly \SI{2.4}{MPa} per kelvin, an upper bound because real cores are only partly restrained. Applying it to the local stream-to-metal or stream-to-stream difference from the model gives a first estimate of where and when the core is most stressed. This is the hand-off point to a structural finite element model, which is what the Akselos platform provides.
+
+%======================================================================
+\section{Map from course techniques to the project}
+%======================================================================
+
+\begin{center}
+\small
+\begin{tabular}{p{4.6cm} p{5.4cm} p{4.6cm}}
+\toprule
+Technique & Where it is used & Tool \\
+\midrule
+Boundary value problem & Steady profiles, Eq.~\eqref{eq:ode_ss} & \texttt{solve\_bvp} \\
+IVP plus root finding & Shooting cross-check, sizing & \texttt{solve\_ivp}, \texttt{brentq}, \texttt{fsolve} \\
+Quadrature & Duty and energy closure, Eq.~\eqref{eq:Q} & \texttt{quad}, \texttt{trapezoid} \\
+Stiff ODEs, method of lines & Transient, Eqs.~\eqref{eq:mol_h}--\eqref{eq:mol_w} & \texttt{solve\_ivp} (BDF, Radau) \\
+Derivatives and sensitivity & Parameter ranking, Section~\ref{sec:sens} & finite differences, \texttt{jax} \\
+Nonlinear regression with confidence intervals & Colburn factor fit & \texttt{least\_squares}, course regression tools \\
+Linear regression, interpolation & Property surrogates & \texttt{lstsq}, \texttt{CubicSpline} \\
+Constrained optimization (stretch) & Startup ramp & \texttt{minimize} (SLSQP) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\begin{thebibliography}{9}
+%======================================================================
+
+\bibitem{nellis2003}
+G.~F. Nellis, ``A heat exchanger model that includes axial conduction, parasitic heat loads, and property variations,'' \emph{Cryogenics}, vol.~43, no.~9, pp.~523--538, 2003.
+
+\bibitem{pacio2011}
+J.~C. Pacio and C.~A. Dorao, ``A review on heat exchanger thermal hydraulic models for cryogenic applications,'' \emph{Cryogenics}, vol.~51, no.~7, pp.~366--379, 2011. \url{https://doi.org/10.1016/j.cryogenics.2011.04.005}
+
+\bibitem{manglik1995}
+R.~M. Manglik and A.~E. Bergles, ``Heat transfer and pressure drop correlations for the rectangular offset strip fin compact heat exchanger,'' \emph{Experimental Thermal and Fluid Science}, vol.~10, no.~2, pp.~171--180, 1995.
+
+\bibitem{kays1984}
+W.~M. Kays and A.~L. London, \emph{Compact Heat Exchangers}, 3rd ed. New York: McGraw-Hill, 1984.
+
+\bibitem{shah2003}
+R.~K. Shah and D.~P. Sekuli\'c, \emph{Fundamentals of Heat Exchanger Design}. Hoboken, NJ: Wiley, 2003.
+
+\bibitem{alpema2025}
+ALPEMA, ``Integrity Operating Windows for Brazed Aluminium Plate-Fin Heat Exchangers,'' June 2025. \url{https://www.alpema.org/pdf/ALPEMA_Integrity_Operating_Window_Table.pdf}
+
+\bibitem{coolprop2014}
+I.~H. Bell, J.~Wronski, S.~Quoilin, and V.~Lemort, ``Pure and pseudo-pure fluid thermophysical property evaluation and the open-source thermophysical property library CoolProp,'' \emph{Industrial \& Engineering Chemistry Research}, vol.~53, no.~6, pp.~2498--2508, 2014. \url{https://doi.org/10.1021/ie4033999}
+
+\bibitem{levenspiel1999}
+O.~Levenspiel, \emph{Chemical Reaction Engineering}, 3rd ed. New York: Wiley, 1999.
+
+\end{thebibliography}
+
+\end{document}
