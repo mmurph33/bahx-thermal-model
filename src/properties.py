@@ -92,19 +92,6 @@ def coolprop_table(fluid, p, T):
         "hhat": hhat
     }
 
-
-    # 1. For each property, call PropsSI(output, "T", T, "P", p, fluid) with the
-    #    CoolProp output keys CPMASS, VISCOSITY, CONDUCTIVITY, DMASS, HMASS.
-    #    PropsSI accepts a numpy array for T; if it complains, loop over T.
-    # 2. Return them in a dict with the keys above, each as a float array of
-    #    shape (n,).
-    # Pitfall: CoolProp's enthalpy has an arbitrary reference state. Only
-    #    enthalpy differences are meaningful, so never compare hhat from two
-    #    different fluids or reference-state settings.
-    # Check: methane at 300 K, 101325 Pa gives cp = 2235.9 J/(kg K) (NIST);
-    #    tests/test_setup.py already checks this value through PropsSI.
-    raise NotImplementedError
-
 def check_single_phase(fluid, p, T_lo, T_hi):
     """Confirm a temperature range is single phase and report its margins.
 
@@ -135,24 +122,73 @@ def check_single_phase(fluid, p, T_lo, T_hi):
     ValueError
         If any part of [T_lo, T_hi] is two-phase or below T_sat.
     """
-    # 1. Get the critical pressure p_crit = PropsSI("pcrit", fluid).
-    # 2. If p < p_crit (subcritical): T_sat = PropsSI("T", "P", p, "Q", 1, fluid).
-    #    Raise ValueError if T_lo <= T_sat. margin = T_lo - T_sat.
-    # 3. If p >= p_crit (supercritical): there is no phase change, but cp peaks
-    #    at the pseudo-critical temperature. Sample cp on a fine grid (0.1-0.5 K)
-    #    from T_crit to T_crit + ~60 K with coolprop_table and take
-    #    T_pc = T at max cp (np.argmax). margin = T_lo - T_pc.
-    #    Raise ValueError if T_lo <= T_pc (the range straddles the peak).
-    # 4. Sample PhaseSI("T", T, "P", p, fluid) at a few points across the range
-    #    as a second check; every phase string should be one of "gas",
-    #    "supercritical_gas" or "supercritical".
-    # 5. cp_ratio = max/min of cp over np.linspace(T_lo, T_hi, ~200).
-    # Pitfall: being above T_pc is not enough. cp still rises steeply on the
-    #    shoulder of the peak (methane at 6 MPa: cp(210 K)/cp(300 K) = 2.4), so
-    #    report cp_ratio and let the fit error decide.
-    # Check: methane at 1.5 MPa gives T_sat = 158.5 K; at 6 MPa gives
-    #    T_pc = 199.6 K. A range starting at 150 K at 1.5 MPa must raise.
-    raise NotImplementedError
+    # Verify T_lo < T_hi
+    if T_lo >= T_hi:
+        raise ValueError("T_lo must be lower than T_hi")
+
+    # Verify P > 0 
+    if p < 0:
+        raise ValueError("Pressure must be positive")
+    
+    # Find critical pressure
+    p_crit = PropsSI("pcrit", fluid)
+
+    if p < p_crit: # For sub-critical pressure
+        T_sat = PropsSI("T", "P", p, "Q", 1, fluid)
+        # Q = 1 to ask CoolProp for saturated-vapor temperature
+
+        if T_lo <= T_sat:
+            raise ValueError("Multiphase")
+
+        T_pc = None
+        margin = T_lo - T_sat
+    else:
+        # Here the fluid is supercritical & there is no phase change
+        # However, cp still peaks at the pseudo-critical temperature
+        T_crit = PropsSI("Tcrit", fluid)
+
+        # Sample cp around T_crit to find the pseudo-critical temperature
+        T_scan = np.arange(
+            T_crit + 0.1,
+            T_crit + 60.0,
+            0.2
+        )
+
+        cp_scan = coolprop_table(fluid, p, T_scan)["cp"]
+
+        # T_pc = T at max cp
+        T_pc = T_scan[np.argmax(cp_scan)]
+
+        T_sat = None
+        margin = T_lo = T_pc
+
+    # Check phase through a few points
+    T_phase = np.linspace(T_lo, T_hi, 5)
+    allowed_phases = {
+        'gas',
+        'supercritical_gas',
+        'supercritical'
+    }
+
+    for temp in T_phase:
+        phase = PhaseSI("T", temp, "P", p, fluid)
+        if phase not in allowed_phases:
+            # Raise error if the phase is not something we would expect
+            raise ValueError(f"Unexpected phase {phase} at T = {temp}K")
+
+    # Calculate the ratio of cp
+    T_fit = np.linspace(T_lo, T_hi, 200)
+    cp_fit = coolprop_table(fluid, p, T_fit)["cp"]
+    cp_ratio = np.max(cp_fit) / np.min(cp_fit)
+
+    # Return
+    return {
+        "supercritical": p <= p_crit,
+        "T_sat": T_sat,
+        "T_pc": T_pc,
+        "margin": margin,
+        "cp_ratio": cp_ratio
+    }
 
 
 def fit_surrogate(fluid, p, T_lo, T_hi, degree, n_points):
