@@ -219,6 +219,8 @@ def fit_surrogate(fluid, p, T_lo, T_hi, degree, n_points):
         Surrogate dict as described in the module docstring, with kind "poly",
         lam = 1.0 and max_rel_err filled in for cp, mu, k, rho and hhat.
     """
+    
+
     # 1. Scaling: T_bar = (T_lo + T_hi)/2, dT = (T_hi - T_lo)/2.
     # 2. Fit points: T_fit = np.linspace(T_lo, T_hi, n_points), shape (n_points,).
     #    Table = coolprop_table(fluid, p, T_fit).
