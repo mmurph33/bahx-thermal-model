@@ -38,6 +38,10 @@ import numpy as np
 from CoolProp.CoolProp import PhaseSI, PropsSI
 from scipy.interpolate import CubicSpline
 
+# CubicSpline is used instead of curve_fit as we know that data from CoolProp is accurate
+# Thus, we want our best fit line to pass through these points as we are not interpolating
+# noisy data
+
 
 def coolprop_table(fluid, p, T):
     """Evaluate CoolProp properties along an isobar (build time only).
@@ -60,6 +64,35 @@ def coolprop_table(fluid, p, T):
         "cp" [J/(kg K)], "mu" [Pa s], "k" [W/(m K)], "rho" [kg/m^3],
         "hhat" [J/kg].
     """
+
+    # Ensure T is a numpy array
+    T = np.asarray(T, dtype = float)
+
+    if T.ndim != 1:
+        raise ValueError('T must be a 1D array')
+
+    cp = np.empty(T.shape)
+    mu = np.empty(T.shape)
+    k = np.empty(T.shape)
+    rho = np.empty(T.shape)
+    hhat = np.empty(T.shape)
+
+    for i, temp in enumerate(T):
+        cp[i] = PropsSI("CPMASS", "T", temp, "P", p, fluid)
+        mu[i] = PropsSI("VISCOSITY", "T", temp, "P", p, fluid )
+        k[i] = PropsSI("CONDUCTIVITY", "T", temp, "P", p, fluid)
+        rho[i] = PropsSI("DMASS", "T", temp, "P", p, fluid)
+        hhat[i] = PropsSI("HMASS", "T", temp, "P", p, fluid)
+
+    return {
+        "cp": cp,
+        "mu": mu,
+        "k": k,
+        "rho": rho,
+        "hhat": hhat
+    }
+
+
     # 1. For each property, call PropsSI(output, "T", T, "P", p, fluid) with the
     #    CoolProp output keys CPMASS, VISCOSITY, CONDUCTIVITY, DMASS, HMASS.
     #    PropsSI accepts a numpy array for T; if it complains, loop over T.
@@ -71,7 +104,6 @@ def coolprop_table(fluid, p, T):
     # Check: methane at 300 K, 101325 Pa gives cp = 2235.9 J/(kg K) (NIST);
     #    tests/test_setup.py already checks this value through PropsSI.
     raise NotImplementedError
-
 
 def check_single_phase(fluid, p, T_lo, T_hi):
     """Confirm a temperature range is single phase and report its margins.
