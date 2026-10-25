@@ -183,7 +183,7 @@ def check_single_phase(fluid, p, T_lo, T_hi):
 
     # Return
     return {
-        "supercritical": p <= p_crit,
+        "supercritical": p >= p_crit,
         "T_sat": T_sat,
         "T_pc": T_pc,
         "margin": margin,
