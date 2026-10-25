@@ -37,6 +37,7 @@ which means the heat transfer coefficient and the hot side elsewhere).
 import numpy as np
 from CoolProp.CoolProp import PhaseSI, PropsSI
 from scipy.interpolate import CubicSpline
+from scipy.optimize import curve_fit
 
 # CubicSpline is used instead of curve_fit as we know that data from CoolProp is accurate
 # Thus, we want our best fit line to pass through these points as we are not interpolating
@@ -191,7 +192,7 @@ def check_single_phase(fluid, p, T_lo, T_hi):
     }
 
 
-def fit_surrogate(fluid, p, T_lo, T_hi, degree, n_points):
+def fit_surrogate_cubicspline(fluid, p, T_lo, T_hi, degree, n_points):
     """Fit polynomial surrogates for one stream at fixed pressure.
 
     Section 8.4, Eq 51: each property is a polynomial in the scaled
@@ -219,43 +220,324 @@ def fit_surrogate(fluid, p, T_lo, T_hi, degree, n_points):
         Surrogate dict as described in the module docstring, with kind "poly",
         lam = 1.0 and max_rel_err filled in for cp, mu, k, rho and hhat.
     """
-    
 
-    # 1. Scaling: T_bar = (T_lo + T_hi)/2, dT = (T_hi - T_lo)/2.
-    # 2. Fit points: T_fit = np.linspace(T_lo, T_hi, n_points), shape (n_points,).
-    #    Table = coolprop_table(fluid, p, T_fit).
-    # 3. Vandermonde matrix V = np.vander(T~_fit, degree + 1, increasing=True),
-    #    shape (n_points, degree + 1). Scaling T~ into [-1, 1] keeps V well
-    #    conditioned; fitting in raw kelvin would not. (The proposal names
-    #    numpy.polyfit, which solves the same least-squares problem; if you
-    #    use it, pass the scaled T~, not kelvin.)
-    # 4. For each name in ("cp", "mu", "k", "rho"): solve
-    #    min ||V c - phi||_2 with np.linalg.lstsq(V, table[name], rcond=None);
-    #    c has shape (degree + 1,).
-    # 5. Enthalpy from cp: hhat(T) = hhat(T_bar) + integral of cp from T_bar to T
-    #                              = hhat_ref + dT * P(T~),
-    #    where P = np.polynomial.polynomial.polyint(c_cp) (P(0) = 0) and
-    #    hhat_ref = CoolProp hhat at T_bar. The factor dT converts the integral
-    #    over T~ back to an integral over T.
-    # 6. Mean values: mean[name] = average of the sampled table values
-    #    (phi_bar in Eq 23).
-    # 7. Validation: evaluate every fit on a different grid,
-    #    T_val = np.linspace(T_lo, T_hi, ~3 * n_points + 1), so you are not
-    #    testing only at the fit points. For each property
-    #    max_rel_err[name] = max |fit/CoolProp - 1|. For hhat, compare
-    #    differences hhat(T) - hhat(T_lo), not absolute values, because
-    #    CoolProp's enthalpy zero is arbitrary.
-    # 8. Return the dict with kind "poly", lam = 1.0 and the fields above.
-    # Spline fallback (Section 8.4): if a polynomial cannot meet the target
-    #    near the cp peak, store CubicSpline(T_fit, table[name]) objects in
-    #    "coef" instead, set kind "spline", and get hhat from
-    #    CubicSpline(...).antiderivative(). CubicSpline extrapolates by default,
-    #    so check_range must be called before evaluating it.
-    # Check: methane at 1.5 MPa on [225, 310] K with degree 6 gives
-    #    max_rel_err below 1e-5 for every property; at 6 MPa, cp error is
-    #    ~8e-4. Also check that the numerical derivative of enthalpy matches
-    #    evaluate(surr, "cp", T) to round-off.
-    raise NotImplementedError
+    # Validate Input
+    if T_lo >= T_hi:
+        raise ValueError("T_lo cannot be higher than T_hi")
+
+    if degree < 0:
+        raise ValueError("Degree cannot be negative")
+
+    if n_points < degree + 1:
+        raise ValueError("Overfitting - n_points be at least degree + 1")
+
+    # Scaling with T_bar
+    T_bar = (T_lo + T_hi) / 2
+    dT = (T_hi - T_lo) / 2
+
+    T_fit = np.linspace(T_lo, T_hi, n_points)
+    T_scale_fit = (T_fit - T_bar) / dT
+
+    # Reference properties at fitting point
+    table = coolprop_table(fluid, p, T_fit)
+    property_names = ("cp", "mu", "k", "rho")
+
+    # Define Vandermonde matrix
+    V = np.vander(T_scale_fit, N = degree + 1, increasing = True)
+    coefficients = {}
+    for name in property_names:
+        coefficients[name] = np.linalg.lstsq(V, np.asarray(table[name]), rcond = None)[0]
+
+    # Find enthalpy with cp polynomial
+    hhat_ref = float(
+        coolprop_table(fluid, p, np.array([T_bar]))["hhat"][0]
+    )
+
+    # cp(T~) = c[0] + c1 * T~ + ...
+    cp_integral = np.polynomial.polynomial.polyint(coefficients["cp"])
+    cp_integral[0] = 0.0
+
+    coefficients["hhat"] = (
+        hhat_ref,
+        cp_integral,
+        T_bar,
+        dT
+    )
+
+
+    # Mean values for properties
+    mean = {
+        name: float(np.mean(table[name]))
+        for name in (*property_names, "hhat")
+    }
+
+    # Validate fit on different grid
+    T_val = np.linspace(T_lo, T_hi, 3*n_points + 1)
+    val_table = coolprop_table(fluid, p, T_val)
+    T_scale_val = (T_val - T_bar) / dT
+
+    max_rel_err = {}
+
+    for name in property_names:
+        fit_values = np.polynomial.polynomial.polyval(
+            T_scale_val, coefficients[name] 
+        )
+        reference = np.asarray(val_table[name])
+
+        # Avoid divison by 0
+        denom = np.maximum(np.abs(reference), 1e-14)
+        max_rel_err[name] = float(
+            np.max(np.abs(fit_values - reference) / denom)
+        )
+
+    # Compare different in hhat (since CoolProp's enthalpy 0 is arbitrary)
+    h_fit = hhat_ref + dT * np.polynomial.polynomial.polyval(
+        T_scale_val, cp_integral
+    )
+
+    h_ref = np.asarray(val_table["hhat"])
+    h_fit_delta = h_fit - h_fit[0]
+    h_ref_delta = h_ref - h_ref[0]
+
+    # Normalize by the overall reference enthalpy change to avoid
+    # dividing by values near zero at the lower endpoint.
+    h_scale = max(
+        float(np.max(np.abs(h_ref_delta))),
+        1e-14,
+    )
+    max_rel_err["hhat"] = float(
+        np.max(np.abs(h_fit_delta - h_ref_delta)) / h_scale
+    )
+
+    # Select polynomial or CubicSpline based on error
+    tolerance = 1e-5
+
+    # If errors are already within tolerance, return as a polynomial
+    if all(err <= tolerance for err in max_rel_err.values()):
+        return {
+            "kind": "poly",
+            "fluid": fluid,
+            "p": p,
+            "T_lo": T_lo,
+            "T_hi": T_hi,
+            "T_bar": T_bar,
+            "dT": dT,
+            "degree": degree,
+            "n_points": n_points,
+            "coef": coefficients,
+            "mean": mean,
+            "lam": 1.0,
+            "max_rel_err": max_rel_err,
+            "hhat_ref": hhat_ref,
+        }
+
+    # If polynomial did not meet tolerance requirement
+    spline_coef = {
+        name: CubicSpline(
+            T_fit, np.asarray(table[name]), extrapolate=True
+        )
+        for name in property_names
+    }
+
+    cp_antiderivative = spline_coef["cp"].antiderivative()
+    h_ref_spline = float(cp_antiderivative(T_bar))
+
+    # Define hhat(T_bar) using CoolProp as the enthalpy reference.
+    hhat_offset = hhat_ref - h_ref_spline
+
+    spline_coef["hhat"] = (
+        cp_antiderivative,
+        hhat_offset,
+    )
+
+    # Validate spline fits on the same independent grid.
+    spline_max_rel_err = {}
+
+    for name in property_names:
+        fit_values = spline_coef[name](T_val)
+        reference = np.asarray(val_table[name])
+        denom = np.maximum(np.abs(reference), 1e-14)
+
+        spline_max_rel_err[name] = float(
+            np.max(np.abs(fit_values - reference) / denom)
+        )
+
+    h_spline = cp_antiderivative(T_val) + hhat_offset
+    h_spline_delta = h_spline - h_spline[0]
+
+    spline_max_rel_err["hhat"] = float(
+        np.max(np.abs(h_spline_delta - h_ref_delta)) / h_scale
+    )
+
+    return {
+        "kind": "spline",
+        "fluid": fluid,
+        "p": p,
+        "T_lo": T_lo,
+        "T_hi": T_hi,
+        "T_bar": T_bar,
+        "dT": dT,
+        "degree": degree,
+        "n_points": n_points,
+        "coef": spline_coef,
+        "mean": mean,
+        "lam": 1.0,
+        "max_rel_err": spline_max_rel_err,
+        "hhat_ref": hhat_ref,
+    }
+
+
+
+def fit_surrogate_curvefit(fluid, p, T_lo, T_hi, degree, n_points):
+    """Fit polynomial property surrogates using scipy.optimize.curve_fit.
+
+    Fits cp, mu, k, and rho as polynomials in scaled temperature.
+    Enthalpy is obtained by integrating the fitted cp polynomial.
+
+    Parameters
+    ----------
+    fluid : str
+        CoolProp fluid name.
+    p : float
+        Pressure [Pa].
+    T_lo, T_hi : float
+        Fit range [K].
+    degree : int
+        Polynomial degree.
+    n_points : int
+        Number of CoolProp samples used for fitting.
+
+    Returns
+    -------
+    surr : dict
+        Polynomial surrogate compatible with the same evaluate()
+        implementation and validation convention as the polynomial
+        branch of fit_surrogate_cubicspline().
+    """
+
+    # Validate Input
+    if T_lo >= T_hi:
+        raise ValueError("T_lo must be less than T_hi.")
+    if degree < 0:
+        raise ValueError("degree must be nonnegative.")
+    if n_points < degree + 1:
+        raise ValueError("n_points must be at least degree + 1.")
+
+    # 1. Scale temperature to [-1, 1].
+    T_bar = 0.5 * (T_lo + T_hi)
+    dT = 0.5 * (T_hi - T_lo)
+
+    T_fit = np.linspace(T_lo, T_hi, n_points)
+    T_tilde_fit = (T_fit - T_bar) / dT
+
+    table = coolprop_table(fluid, p, T_fit)
+    property_names = ("cp", "mu", "k", "rho")
+
+    # Polynomial with coefficients in ascending order:
+    # c[0] + c[1]*x + ... + c[degree]*x**degree
+    def polynomial(x, *coefficients):
+        return np.polynomial.polynomial.polyval(x, coefficients)
+
+    # 2. Fit each property using nonlinear least squares.
+    coefficients = {}
+
+    initial_guess = np.zeros(degree + 1)
+
+    for name in property_names:
+        y = np.asarray(table[name], dtype=float)
+
+        # Use a linear least-squares fit as a stable initial guess.
+        # curve_fit then optimizes the same polynomial model.
+        V = np.vander(
+            T_tilde_fit, N=degree + 1, increasing=True
+        )
+        initial_guess = np.linalg.lstsq(V, y, rcond=None)[0]
+
+        popt, _ = curve_fit(
+            polynomial,
+            T_tilde_fit,
+            y,
+            p0=initial_guess,
+            maxfev=100000,
+        )
+
+        coefficients[name] = np.asarray(popt)
+
+    # 3. Construct enthalpy by integrating the cp polynomial.
+    hhat_ref = float(
+        coolprop_table(
+            fluid, p, np.array([T_bar])
+        )["hhat"][0]
+    )
+
+    cp_integral = np.polynomial.polynomial.polyint(
+        coefficients["cp"]
+    )
+    cp_integral[0] = 0.0
+
+    coefficients["hhat"] = (
+        hhat_ref,
+        cp_integral,
+        T_bar,
+        dT,
+    )
+
+    # 4. Compute sampled means.
+    mean = {
+        name: float(np.mean(table[name]))
+        for name in (*property_names, "hhat")
+    }
+
+    # 5. Validate on a separate, denser temperature grid.
+    T_val = np.linspace(T_lo, T_hi, 3 * n_points + 1)
+    T_tilde_val = (T_val - T_bar) / dT
+    val_table = coolprop_table(fluid, p, T_val)
+
+    max_rel_err = {}
+
+    for name in property_names:
+        fitted = polynomial(
+            T_tilde_val, *coefficients[name]
+        )
+        reference = np.asarray(val_table[name], dtype=float)
+
+        denominator = np.maximum(np.abs(reference), 1e-14)
+        max_rel_err[name] = float(
+            np.max(np.abs(fitted - reference) / denominator)
+        )
+
+    # Compare enthalpy increments because its absolute reference
+    # value is arbitrary.
+    h_fit = hhat_ref + dT * polynomial(
+        T_tilde_val, *cp_integral
+    )
+    h_ref = np.asarray(val_table["hhat"], dtype=float)
+
+    h_fit_delta = h_fit - h_fit[0]
+    h_ref_delta = h_ref - h_ref[0]
+
+    h_scale = max(float(np.max(np.abs(h_ref_delta))), 1e-14)
+
+    max_rel_err["hhat"] = float(
+        np.max(np.abs(h_fit_delta - h_ref_delta)) / h_scale
+    )
+
+    return {
+        "kind": "poly",
+        "fluid": fluid,
+        "p": p,
+        "T_lo": T_lo,
+        "T_hi": T_hi,
+        "T_bar": T_bar,
+        "dT": dT,
+        "degree": degree,
+        "n_points": n_points,
+        "coef": coefficients,
+        "mean": mean,
+        "lam": 1.0,
+        "max_rel_err": max_rel_err,
+        "hhat_ref": hhat_ref,
+    }
 
 
 def build_surrogates(params, scenario="none"):
@@ -430,6 +712,7 @@ def evaluate(surr, name, T):
     phi : ndarray, same shape as T
         Property value in SI units (see module docstring).
     """
+    
     # 1. check_range(surr, T).
     # 2. T~ = (T - T_bar)/dT.
     # 3. kind "poly": phi = np.polynomial.polynomial.polyval(T~, coef[name])
