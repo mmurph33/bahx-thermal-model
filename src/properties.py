@@ -712,7 +712,8 @@ def constant_surrogate(cp, mu, k, rho, T_lo, T_hi, hhat_ref=0.0):
         "hhat_coeff": hhat_coeff
     }
 
-
+# Bridge between constant and temperature dependent surrogate to ensure
+# steady state and transient can be solved numerically
 def continuation_surrogate(surr, lam):
     """Return a copy of a surrogate with continuation parameter lambda set.
 
@@ -734,15 +735,14 @@ def continuation_surrogate(surr, lam):
         applied inside evaluate(), so this works for polynomial and spline
         surrogates alike.
     """
-    # 1. Make a shallow copy: dict(surr). Do not modify the caller's surrogate.
-    # 2. Set the copy's "lam" to lam and return it.
-    # Note: Eq 23 blends cp, mu and k only. rho and hhat are not blended; the
-    #    steady solve does not use rho, and hhat is only used for the duty after
-    #    the lambda = 1 solve.
-    # Check: evaluate(continuation_surrogate(s, 0.0), "cp", T) equals
-    #    s["mean"]["cp"] for every T; with lam = 1 it equals evaluate(s, "cp", T);
-    #    the original s["lam"] is still 1.0.
-    raise NotImplementedError
+
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError("lamdha must be between 0 and 1")
+
+    surr_lam = dict(surr)
+    surr_lam["lam"] = lam
+
+    return surr_lam
 
 
 def check_range(surr, T):
@@ -764,16 +764,26 @@ def check_range(surr, T):
         offending min/max and the valid range, which makes debugging solver
         overshoots much faster.
     """
-    # 1. T = np.asarray(T). Use np.any (not Python `if T < ...`) so arrays of
-    #    any shape work, including solve_bvp's (m,) and solve_ivp's (N,).
-    # 2. Raise ValueError if np.any(np.isnan(T)) or np.any(T < T_lo) or
-    #    np.any(T > T_hi). Include np.min(T), np.max(T), T_lo, T_hi and
-    #    surr["p"] in the message.
-    # Pitfall: if a solver keeps tripping this, the fix is a wider
-    #    fit_T_margin or a better initial guess, not removing the check.
-    # Check: T exactly at T_lo and T_hi passes; T_lo - 1e-9 raises; a (2, m)
-    #    array with one bad entry raises.
-    raise NotImplementedError
+
+    T = np.asarray(T, dtype = float)
+    T_lo = surr["T_lo"]
+    T_hi = surr["T_hi"]
+
+    # Detect any NaN or out of range temperature
+    invalid = (
+        np.any(np.isnan(T))
+        or np.any(T < T_lo)
+        or np.any(T > T_hi)
+    )
+
+    if invalid:
+        raise ValueError(
+            f"Temperature outside surrogate range or contains NaN: "
+            f"T_min={np.nanmin(T):.6g} K, "
+            f"T_max={np.nanmax(T):.6g} K, "
+            f"valid range=[{T_lo:.6g}, {T_hi:.6g}] K, "
+            f"p={surr['p']} Pa."
+        )
 
 
 def evaluate(surr, name, T):
@@ -797,20 +807,39 @@ def evaluate(surr, name, T):
     phi : ndarray, same shape as T
         Property value in SI units (see module docstring).
     """
+    if name not in ("cp", "mu", "k", "rho"):
+        raise ValueError(f"Unknown property {name!r} detected")
+
+    # Check temperature bound
+    check_range(surr, T)
+
+    # Scale temperature
+    T = np.asarray(T, dtype = float)
+    T_scaled = (T - surr["T_bar"]) / surr["T_bar"]
+
+    # Evaluate underlying surrogate model type (poly, cubicspline)
+    kind = surr["kind"]
+    coeff = surr["coeff"][name]
+
+
+    if kind == "poly":
+        phi = np.polynomial.polynomial.polyval(T_scaled, coef)
+    elif kind == "spline":
+        phi = coef(T_scaled)
+    else:
+        raise ValueError(f"Unknown surrogate kind: {kind!r}")
+
+    # Apply continuation blend to cp, mu, and k
+    lam = surr.get("lam", 1.0)
     
-    # 1. check_range(surr, T).
-    # 2. T~ = (T - T_bar)/dT.
-    # 3. kind "poly": phi = np.polynomial.polynomial.polyval(T~, coef[name])
-    #    (Horner's rule; works elementwise for any array shape).
-    #    kind "spline": phi = coef[name](T).
-    # 4. If name is in ("cp", "mu", "k") and lam != 1:
-    #    phi = (1 - lam) * mean[name] + lam * phi   (Eq 23).
-    # 5. Return phi with the same shape as T.
-    # Pitfall: never call CoolProp here. This function runs inside every
-    #    right-hand-side evaluation.
-    # Check: at the fit points the value matches coolprop_table to within
-    #    max_rel_err; shape (2, 7) in gives shape (2, 7) out.
-    raise NotImplementedError
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError(f"Continuation parameter lam={lam} is outside [0, 1].")
+
+    if name in ("cp", "mu", "k") and lam != 1.0:
+        phi = (1.0 - lam) * surr["mean"][name] + lam * phi
+
+    # 5. Preserve the input shape, including scalar inputs.
+    return np.asarray(phi).reshape(T.shape)
 
 
 def enthalpy(surr, T):
@@ -832,13 +861,26 @@ def enthalpy(surr, T):
     hhat : ndarray, same shape as T
         Specific enthalpy [J/kg] (only differences are physical).
     """
-    # 1. check_range(surr, T).
-    # 2. kind "poly": hhat = hhat_ref + dT * polyval((T - T_bar)/dT, hhat_coef).
-    #    kind "spline": hhat = hhat_ref + (antiderivative spline)(T) minus its
-    #    value at T_bar.
-    # 3. Ignore lam here (see continuation_surrogate).
-    # Check: (enthalpy(s, T + 1e-3) - enthalpy(s, T - 1e-3)) / 2e-3 equals
-    #    evaluate(s, "cp", T) to ~1e-8 relative; differences
-    #    enthalpy(s, T) - enthalpy(s, T_lo) match CoolProp HMASS differences
-    #    to within max_rel_err["hhat"].
-    raise NotImplementedError
+
+    # Validate temperature range
+    check_range(surr, T)
+    T = np.asarray(T, dtype = float)
+
+    # Determine hhat depending on the kind of surrogate model
+    kind = surr["kind"]
+    hhat_ref = surr["hhat_ref"]
+    hhat_coeff = surr["hhat_coeff"]
+    T_bar = surr["T_bar"]
+    dT = surr["dT"]
+
+    if kind == "poly":
+        T_scaled = (T - T_bar) / dT
+        hhat = hhat_ref + dT * np.polynomial.polynomial.polyval(T_scaled, hhat_coeff)
+    elif kind == "spline":
+        cp_spline = surr["coeff"]["cp"]
+        cp_integral = cp_spline.antiderivative()
+        hhat = hhat_ref + cp_integral(T) - cp_integral(T_bar)
+    else:
+        raise ValueError(f"Unsupported type {kind}")
+
+    return np.asarray(hhat).reshape(T.shape)
