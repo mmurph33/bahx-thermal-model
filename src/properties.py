@@ -128,7 +128,7 @@ def check_single_phase(fluid, p, T_lo, T_hi):
         raise ValueError("T_lo must be lower than T_hi")
 
     # Verify P > 0 
-    if p < 0:
+    if p <= 0:
         raise ValueError("Pressure must be positive")
     
     # Find critical pressure
@@ -161,7 +161,7 @@ def check_single_phase(fluid, p, T_lo, T_hi):
         T_pc = T_scan[np.argmax(cp_scan)]
 
         T_sat = None
-        margin = T_lo = T_pc
+        margin = T_lo - T_pc
 
     # Check phase through a few points
     T_phase = np.linspace(T_lo, T_hi, 5)
@@ -184,7 +184,7 @@ def check_single_phase(fluid, p, T_lo, T_hi):
 
     # Return
     return {
-        "supercritical": p <= p_crit,
+        "supercritical": p > p_crit,
         "T_sat": T_sat,
         "T_pc": T_pc,
         "margin": margin,
@@ -581,6 +581,8 @@ def build_surrogates(params, scenario="none"):
         if params["ramp_dT"] < 0:
             T_min = min(T_min, T_max + ramp_dT)
             T_max = max(T_min, T_max + ramp_dT)
+        else:
+            T_max = T_max + ramp_dT
 
     # Add margins to ensure surrogate covers full range
     T_lo = T_min - params["fit_T_margin"]
@@ -632,68 +634,88 @@ def build_surrogates(params, scenario="none"):
     return props
 
 
-def constant_surrogate(cp, mu, k, rho, T_lo, T_hi, hhat_ref=0.0):
-    """Build a constant-property surrogate (no CoolProp).
 
-    Used for the constant-property verification against the analytical
-    epsilon-NTU solution (Section 3.5) and for unit tests of the solvers.
+def constant_surrogate(cp, mu, k, rho, T_lo, T_hi, hhat_ref=0.0):
+    """Build a constant-property surrogate using the standard surrogate format.
+
+    The surrogate is compatible with evaluate(), enthalpy(), and the
+    continuation framework. No CoolProp calls are required.
 
     Parameters
     ----------
     cp : float
         Heat capacity [J/(kg K)].
     mu : float
-        Viscosity [Pa s].
+        Dynamic viscosity [Pa s].
     k : float
         Thermal conductivity [W/(m K)].
     rho : float
         Density [kg/m^3].
     T_lo, T_hi : float
-        Valid range [K] (still enforced, to catch solver bugs).
+        Valid temperature range [K].
     hhat_ref : float, optional
-        Enthalpy at the range midpoint [J/kg].
+        Specific enthalpy at T_bar [J/kg].
 
     Returns
     -------
     surr : dict
-        Surrogate dict of kind "poly" and degree 0, so evaluate() and
-        enthalpy() need no special case. max_rel_err is 0 for every property.
+        Standardized polynomial surrogate dictionary.
     """
+    # 1. Validate inputs.
+    if not np.isfinite(T_lo) or not np.isfinite(T_hi):
+        raise ValueError("T_lo and T_hi must be finite.")
 
-    # Validate input
-    if T_lo > T_hi:
-        raise ValueError('T_lo cannot be higher than T_hi')
+    if T_lo >= T_hi:
+        raise ValueError("T_lo must be less than T_hi.")
 
-    if cp <= 0 or mu <= 0 or k <= 0 or rho <= 0:
-        raise ValueError('cp, mu, k, rho cannot be negative')
+    properties = {"cp": cp, "mu": mu, "k": k, "rho": rho}
 
+    for name, value in properties.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive.")
+
+    if not np.isfinite(hhat_ref):
+        raise ValueError("hhat_ref must be finite.")
+
+    # 2. Temperature scaling, consistent with the fitted surrogates.
     T_bar = (T_lo + T_hi) / 2
     dT = (T_hi - T_lo) / 2
 
-    # Constant properties
+    # 3. Constant property polynomials.
+    # Coefficients are in ascending powers of scaled temperature.
+    coef = {
+        name: np.array([value], dtype=float)
+        for name, value in properties.items()
+    }
+
+    # 4. Integrated cp polynomial.
+    # cp(T_scaled) = cp, so its integral is cp * T_scaled.
+    # enthalpy() multiplies this integral by dT.
+    cp_integral = np.polynomial.polynomial.polyint(coef["cp"])
+    cp_integral[0] = 0.0
+
+    # Match the hhat representation used by the polynomial fit functions.
+    coef["hhat"] = (hhat_ref, cp_integral, T_bar, dT)
+
+    # 5. Mean properties, including the enthalpy reference.
     mean = {
         "cp": cp,
         "mu": mu,
         "k": k,
-        "rho": rho
+        "rho": rho,
+        "hhat": hhat_ref,
     }
 
-    # Constant values
-    coeff = {}
-    for name,value in mean.items():
-        coeff[name] = np.array([value], dtype = float)
-
-    # Enthlapy: integral of cp with respect to dT
-    hhat_coeff = np.array([0.0, cp * dT], dtype = float)
-
-    # max_rel_err = 0 since they are constant
+    # 6. Constant properties have zero fitting error.
     max_rel_err = {
         "cp": 0.0,
         "mu": 0.0,
         "k": 0.0,
-        "rho": 0.0
+        "rho": 0.0,
+        "hhat": 0.0,
     }
 
+    # 7. Return the standardized surrogate dictionary.
     return {
         "kind": "poly",
         "fluid": "constant",
@@ -704,13 +726,13 @@ def constant_surrogate(cp, mu, k, rho, T_lo, T_hi, hhat_ref=0.0):
         "dT": dT,
         "degree": 0,
         "n_points": 1,
-        "coef": coeff,
+        "coef": coef,
         "mean": mean,
         "lam": 1.0,
         "max_rel_err": max_rel_err,
         "hhat_ref": hhat_ref,
-        "hhat_coeff": hhat_coeff
     }
+
 
 # Bridge between constant and temperature dependent surrogate to ensure
 # steady state and transient can be solved numerically
@@ -815,11 +837,11 @@ def evaluate(surr, name, T):
 
     # Scale temperature
     T = np.asarray(T, dtype = float)
-    T_scaled = (T - surr["T_bar"]) / surr["T_bar"]
+    T_scaled = (T - surr["T_bar"]) / surr["dT"]
 
     # Evaluate underlying surrogate model type (poly, cubicspline)
     kind = surr["kind"]
-    coeff = surr["coeff"][name]
+    coef = surr["coef"][name]
 
 
     if kind == "poly":
@@ -868,18 +890,14 @@ def enthalpy(surr, T):
 
     # Determine hhat depending on the kind of surrogate model
     kind = surr["kind"]
-    hhat_ref = surr["hhat_ref"]
-    hhat_coeff = surr["hhat_coeff"]
-    T_bar = surr["T_bar"]
-    dT = surr["dT"]
-
     if kind == "poly":
+        hhat_ref, cp_integral, T_bar, dT = surr["coeff"]["hhat"]
         T_scaled = (T - T_bar) / dT
-        hhat = hhat_ref + dT * np.polynomial.polynomial.polyval(T_scaled, hhat_coeff)
+        hhat = hhat_ref + dT * np.polynomial.polynomial.polyval(T_scaled, cp_integral)
+
     elif kind == "spline":
-        cp_spline = surr["coeff"]["cp"]
-        cp_integral = cp_spline.antiderivative()
-        hhat = hhat_ref + cp_integral(T) - cp_integral(T_bar)
+        cp_integral, hhat_offset = surr["coef"]["hhat"]
+        hhat = cp_integral(T) + hhat_offsets
     else:
         raise ValueError(f"Unsupported type {kind}")
 
