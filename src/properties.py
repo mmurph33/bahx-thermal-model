@@ -547,6 +547,9 @@ def build_surrogates(params, scenario="none"):
     the coldest and the hottest inlet temperature over the whole run, so the
     fit range is [min inlet, max inlet] widened by ``params["fit_T_margin"]``.
 
+    Note that any changes to pressure, inlet temperature or ramp rate will
+    require a new surrogate model.
+
     Parameters
     ----------
     params : dict
@@ -567,26 +570,70 @@ def build_surrogates(params, scenario="none"):
     ValueError
         If a range is not single phase or a fit misses fit_max_rel_err.
     """
-    # 1. Coldest inlet over the run: T_min = T_c_in. Hottest: T_max = T_h_in,
-    #    plus ramp_dT if scenario == "feed_ramp" and ramp_dT > 0. (If ramp_dT
-    #    is negative, the ramp lowers the hot inlet; T_min must then be
-    #    min(T_c_in, T_h_in + ramp_dT).)
-    # 2. T_lo = T_min - fit_T_margin, T_hi = T_max + fit_T_margin. Use the same
-    #    range for both sides: in a cold trip the cold stream can warm almost
-    #    to T_h_in, and the hot stream can cool almost to T_c_in.
-    # 3. For each side (p_h for "h", p_c for "c"): check_single_phase, then
-    #    fit_surrogate with fit_degree and fit_n_points.
-    # 4. If any max_rel_err exceeds fit_max_rel_err, raise ValueError naming the
-    #    side and property (or switch that side to the spline fallback). Do not
-    #    silently accept a poor fit.
-    # 5. Print or return each surrogate's max_rel_err: CLAUDE.md asks us to
-    #    report it.
+
+
+    # Set max and min temperature
+    T_min = params["T_c_in"]
+    T_max = params["T_h_in"]
+
+    if scenario == "feed_ramp":
+        ramp_dT = params["ramp_dT"]
+        if params["ramp_dT"] < 0:
+            T_min = min(T_min, T_max + ramp_dT)
+            T_max = max(T_min, T_max + ramp_dT)
+
+    # Add margins to ensure surrogate covers full range
+    T_lo = T_min - params["fit_T_margin"]
+    T_hi = T_max + params["fit_T_margin"]
+
+    # Build surrogate at each stream's operating pressure
+    props = {}
+    for side, pressure_key in (("h", "p_h"), ("c", "p_c")):
+        pressure = params[pressure_key]
+
+        # check entire range in single phase
+        check_single_phase(
+            params["fluid"],
+            pressure, 
+            T_lo, 
+            T_hi
+        )
+
+        # Fit property surrogate
+        surrogate = fit_surrogate_curvefit(
+            params["fluid"],
+            pressure,
+            T_lo,
+            T_hi,
+            params["fit_degree"],
+            params["fit_n_points"],
+        )
+
+
+        # Validate the fitting error.
+        max_rel_err = surrogate["max_rel_err"]
+
+        for prop, err in max_rel_err.items():
+            if err > params["fit_max_rel_err"]:
+                raise ValueError(
+                    f"{side}-side {prop} fit error too high: "
+                    f"{err:.6e} > {params['fit_max_rel_err']:.6e}"
+                )
+
+        props[side] = surrogate
+
+        print(
+            f"{side}-side surrogate: "
+            f"P={pressure:.6g} Pa, "
+            f"T=[{T_lo:.2f}, {T_hi:.2f}] K, "
+            f"max_rel_err={max_rel_err}"
+        )
+
+    return props
+
     # Pitfall: rebuild props whenever a pressure, an inlet temperature or the
     #    ramp size changes (e.g. inside a sweep of ramp rates). A stale surrogate
     #    either raises out of range or silently uses the wrong pressure.
-    # Check: with the base case (6 MPa / 1.5 MPa, 300 K / 235 K) and degree 6,
-    #    both sides build and every max_rel_err is below 1e-3.
-    raise NotImplementedError
 
 
 def constant_surrogate(cp, mu, k, rho, T_lo, T_hi, hhat_ref=0.0):
