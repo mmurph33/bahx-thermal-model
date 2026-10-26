@@ -631,10 +631,6 @@ def build_surrogates(params, scenario="none"):
 
     return props
 
-    # Pitfall: rebuild props whenever a pressure, an inlet temperature or the
-    #    ramp size changes (e.g. inside a sweep of ramp rates). A stale surrogate
-    #    either raises out of range or silently uses the wrong pressure.
-
 
 def constant_surrogate(cp, mu, k, rho, T_lo, T_hi, hhat_ref=0.0):
     """Build a constant-property surrogate (no CoolProp).
@@ -663,16 +659,58 @@ def constant_surrogate(cp, mu, k, rho, T_lo, T_hi, hhat_ref=0.0):
         Surrogate dict of kind "poly" and degree 0, so evaluate() and
         enthalpy() need no special case. max_rel_err is 0 for every property.
     """
-    # 1. T_bar and dT as in fit_surrogate.
-    # 2. coef[name] = np.array([value]) for each property (degree-0 polynomial).
-    # 3. hhat_coef = polyint(coef["cp"]) = [0, cp]. Then
-    #    enthalpy = hhat_ref + dT * cp * T~ = hhat_ref + cp (T - T_bar), the
-    #    exact constant-cp enthalpy.
-    # 4. mean[name] = value; lam = 1.0; max_rel_err all 0.0; fluid "constant";
-    #    p = None.
-    # Check: evaluate(surr, "cp", T) returns cp for any T in range, and
-    #    enthalpy(surr, T2) - enthalpy(surr, T1) == cp (T2 - T1).
-    raise NotImplementedError
+
+    # Validate input
+    if T_lo > T_hi:
+        raise ValueError('T_lo cannot be higher than T_hi')
+
+    if cp <= 0 or mu <= 0 or k <= 0 or rho <= 0:
+        raise ValueError('cp, mu, k, rho cannot be negative')
+
+    T_bar = (T_lo + T_hi) / 2
+    dT = (T_hi - T_lo) / 2
+
+    # Constant properties
+    mean = {
+        "cp": cp,
+        "mu": mu,
+        "k": k,
+        "rho": rho
+    }
+
+    # Constant values
+    coeff = {}
+    for name,value in mean.items():
+        coeff[name] = np.array([value], dtype = float)
+
+    # Enthlapy: integral of cp with respect to dT
+    hhat_coeff = np.array([0.0, cp * dT], dtype = float)
+
+    # max_rel_err = 0 since they are constant
+    max_rel_err = {
+        "cp": 0.0,
+        "mu": 0.0,
+        "k": 0.0,
+        "rho": 0.0
+    }
+
+    return {
+        "kind": "poly",
+        "fluid": "constant",
+        "p": None,
+        "T_lo": T_lo,
+        "T_hi": T_hi,
+        "T_bar": T_bar,
+        "dT": dT,
+        "degree": 0,
+        "n_points": 1,
+        "coef": coeff,
+        "mean": mean,
+        "lam": 1.0,
+        "max_rel_err": max_rel_err,
+        "hhat_ref": hhat_ref,
+        "hhat_coeff": hhat_coeff
+    }
 
 
 def continuation_surrogate(surr, lam):
