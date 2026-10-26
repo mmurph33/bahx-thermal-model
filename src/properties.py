@@ -128,7 +128,7 @@ def check_single_phase(fluid, p, T_lo, T_hi):
         raise ValueError("T_lo must be lower than T_hi")
 
     # Verify P > 0 
-    if p < 0:
+    if p <= 0:
         raise ValueError("Pressure must be positive")
     
     # Find critical pressure
@@ -161,7 +161,7 @@ def check_single_phase(fluid, p, T_lo, T_hi):
         T_pc = T_scan[np.argmax(cp_scan)]
 
         T_sat = None
-        margin = T_lo = T_pc
+        margin = T_lo - T_pc
 
     # Check phase through a few points
     T_phase = np.linspace(T_lo, T_hi, 5)
@@ -184,7 +184,7 @@ def check_single_phase(fluid, p, T_lo, T_hi):
 
     # Return
     return {
-        "supercritical": p >= p_crit,
+        "supercritical": p > p_crit,
         "T_sat": T_sat,
         "T_pc": T_pc,
         "margin": margin,
@@ -547,6 +547,9 @@ def build_surrogates(params, scenario="none"):
     the coldest and the hottest inlet temperature over the whole run, so the
     fit range is [min inlet, max inlet] widened by ``params["fit_T_margin"]``.
 
+    Note that any changes to pressure, inlet temperature or ramp rate will
+    require a new surrogate model.
+
     Parameters
     ----------
     params : dict
@@ -567,67 +570,172 @@ def build_surrogates(params, scenario="none"):
     ValueError
         If a range is not single phase or a fit misses fit_max_rel_err.
     """
-    # 1. Coldest inlet over the run: T_min = T_c_in. Hottest: T_max = T_h_in,
-    #    plus ramp_dT if scenario == "feed_ramp" and ramp_dT > 0. (If ramp_dT
-    #    is negative, the ramp lowers the hot inlet; T_min must then be
-    #    min(T_c_in, T_h_in + ramp_dT).)
-    # 2. T_lo = T_min - fit_T_margin, T_hi = T_max + fit_T_margin. Use the same
-    #    range for both sides: in a cold trip the cold stream can warm almost
-    #    to T_h_in, and the hot stream can cool almost to T_c_in.
-    # 3. For each side (p_h for "h", p_c for "c"): check_single_phase, then
-    #    fit_surrogate with fit_degree and fit_n_points.
-    # 4. If any max_rel_err exceeds fit_max_rel_err, raise ValueError naming the
-    #    side and property (or switch that side to the spline fallback). Do not
-    #    silently accept a poor fit.
-    # 5. Print or return each surrogate's max_rel_err: CLAUDE.md asks us to
-    #    report it.
-    # Pitfall: rebuild props whenever a pressure, an inlet temperature or the
-    #    ramp size changes (e.g. inside a sweep of ramp rates). A stale surrogate
-    #    either raises out of range or silently uses the wrong pressure.
-    # Check: with the base case (6 MPa / 1.5 MPa, 300 K / 235 K) and degree 6,
-    #    both sides build and every max_rel_err is below 1e-3.
-    raise NotImplementedError
+
+
+    # Set max and min temperature
+    T_min = params["T_c_in"]
+    T_max = params["T_h_in"]
+
+    if scenario == "feed_ramp":
+        ramp_dT = params["ramp_dT"]
+        if params["ramp_dT"] < 0:
+            T_min = min(T_min, T_max + ramp_dT)
+            T_max = max(T_min, T_max + ramp_dT)
+        else:
+            T_max = T_max + ramp_dT
+
+    # Add margins to ensure surrogate covers full range
+    T_lo = T_min - params["fit_T_margin"]
+    T_hi = T_max + params["fit_T_margin"]
+
+    # Build surrogate at each stream's operating pressure
+    props = {}
+    for side, pressure_key in (("h", "p_h"), ("c", "p_c")):
+        pressure = params[pressure_key]
+
+        # check entire range in single phase
+        check_single_phase(
+            params["fluid"],
+            pressure, 
+            T_lo, 
+            T_hi
+        )
+
+        # Fit property surrogate
+        surrogate = fit_surrogate_curvefit(
+            params["fluid"],
+            pressure,
+            T_lo,
+            T_hi,
+            params["fit_degree"],
+            params["fit_n_points"],
+        )
+
+
+        # Validate the fitting error.
+        max_rel_err = surrogate["max_rel_err"]
+
+        for prop, err in max_rel_err.items():
+            if err > params["fit_max_rel_err"]:
+                raise ValueError(
+                    f"{side}-side {prop} fit error too high: "
+                    f"{err:.6e} > {params['fit_max_rel_err']:.6e}"
+                )
+
+        props[side] = surrogate
+
+        print(
+            f"{side}-side surrogate: "
+            f"P={pressure:.6g} Pa, "
+            f"T=[{T_lo:.2f}, {T_hi:.2f}] K, "
+            f"max_rel_err={max_rel_err}"
+        )
+
+    return props
+
 
 
 def constant_surrogate(cp, mu, k, rho, T_lo, T_hi, hhat_ref=0.0):
-    """Build a constant-property surrogate (no CoolProp).
+    """Build a constant-property surrogate using the standard surrogate format.
 
-    Used for the constant-property verification against the analytical
-    epsilon-NTU solution (Section 3.5) and for unit tests of the solvers.
+    The surrogate is compatible with evaluate(), enthalpy(), and the
+    continuation framework. No CoolProp calls are required.
 
     Parameters
     ----------
     cp : float
         Heat capacity [J/(kg K)].
     mu : float
-        Viscosity [Pa s].
+        Dynamic viscosity [Pa s].
     k : float
         Thermal conductivity [W/(m K)].
     rho : float
         Density [kg/m^3].
     T_lo, T_hi : float
-        Valid range [K] (still enforced, to catch solver bugs).
+        Valid temperature range [K].
     hhat_ref : float, optional
-        Enthalpy at the range midpoint [J/kg].
+        Specific enthalpy at T_bar [J/kg].
 
     Returns
     -------
     surr : dict
-        Surrogate dict of kind "poly" and degree 0, so evaluate() and
-        enthalpy() need no special case. max_rel_err is 0 for every property.
+        Standardized polynomial surrogate dictionary.
     """
-    # 1. T_bar and dT as in fit_surrogate.
-    # 2. coef[name] = np.array([value]) for each property (degree-0 polynomial).
-    # 3. hhat_coef = polyint(coef["cp"]) = [0, cp]. Then
-    #    enthalpy = hhat_ref + dT * cp * T~ = hhat_ref + cp (T - T_bar), the
-    #    exact constant-cp enthalpy.
-    # 4. mean[name] = value; lam = 1.0; max_rel_err all 0.0; fluid "constant";
-    #    p = None.
-    # Check: evaluate(surr, "cp", T) returns cp for any T in range, and
-    #    enthalpy(surr, T2) - enthalpy(surr, T1) == cp (T2 - T1).
-    raise NotImplementedError
+    # 1. Validate inputs.
+    if not np.isfinite(T_lo) or not np.isfinite(T_hi):
+        raise ValueError("T_lo and T_hi must be finite.")
+
+    if T_lo >= T_hi:
+        raise ValueError("T_lo must be less than T_hi.")
+
+    properties = {"cp": cp, "mu": mu, "k": k, "rho": rho}
+
+    for name, value in properties.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive.")
+
+    if not np.isfinite(hhat_ref):
+        raise ValueError("hhat_ref must be finite.")
+
+    # 2. Temperature scaling, consistent with the fitted surrogates.
+    T_bar = (T_lo + T_hi) / 2
+    dT = (T_hi - T_lo) / 2
+
+    # 3. Constant property polynomials.
+    # Coefficients are in ascending powers of scaled temperature.
+    coef = {
+        name: np.array([value], dtype=float)
+        for name, value in properties.items()
+    }
+
+    # 4. Integrated cp polynomial.
+    # cp(T_scaled) = cp, so its integral is cp * T_scaled.
+    # enthalpy() multiplies this integral by dT.
+    cp_integral = np.polynomial.polynomial.polyint(coef["cp"])
+    cp_integral[0] = 0.0
+
+    # Match the hhat representation used by the polynomial fit functions.
+    coef["hhat"] = (hhat_ref, cp_integral, T_bar, dT)
+
+    # 5. Mean properties, including the enthalpy reference.
+    mean = {
+        "cp": cp,
+        "mu": mu,
+        "k": k,
+        "rho": rho,
+        "hhat": hhat_ref,
+    }
+
+    # 6. Constant properties have zero fitting error.
+    max_rel_err = {
+        "cp": 0.0,
+        "mu": 0.0,
+        "k": 0.0,
+        "rho": 0.0,
+        "hhat": 0.0,
+    }
+
+    # 7. Return the standardized surrogate dictionary.
+    return {
+        "kind": "poly",
+        "fluid": "constant",
+        "p": None,
+        "T_lo": T_lo,
+        "T_hi": T_hi,
+        "T_bar": T_bar,
+        "dT": dT,
+        "degree": 0,
+        "n_points": 1,
+        "coef": coef,
+        "mean": mean,
+        "lam": 1.0,
+        "max_rel_err": max_rel_err,
+        "hhat_ref": hhat_ref,
+    }
 
 
+# Bridge between constant and temperature dependent surrogate to ensure
+# steady state and transient can be solved numerically
 def continuation_surrogate(surr, lam):
     """Return a copy of a surrogate with continuation parameter lambda set.
 
@@ -649,15 +757,14 @@ def continuation_surrogate(surr, lam):
         applied inside evaluate(), so this works for polynomial and spline
         surrogates alike.
     """
-    # 1. Make a shallow copy: dict(surr). Do not modify the caller's surrogate.
-    # 2. Set the copy's "lam" to lam and return it.
-    # Note: Eq 23 blends cp, mu and k only. rho and hhat are not blended; the
-    #    steady solve does not use rho, and hhat is only used for the duty after
-    #    the lambda = 1 solve.
-    # Check: evaluate(continuation_surrogate(s, 0.0), "cp", T) equals
-    #    s["mean"]["cp"] for every T; with lam = 1 it equals evaluate(s, "cp", T);
-    #    the original s["lam"] is still 1.0.
-    raise NotImplementedError
+
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError("lamdha must be between 0 and 1")
+
+    surr_lam = dict(surr)
+    surr_lam["lam"] = lam
+
+    return surr_lam
 
 
 def check_range(surr, T):
@@ -679,16 +786,26 @@ def check_range(surr, T):
         offending min/max and the valid range, which makes debugging solver
         overshoots much faster.
     """
-    # 1. T = np.asarray(T). Use np.any (not Python `if T < ...`) so arrays of
-    #    any shape work, including solve_bvp's (m,) and solve_ivp's (N,).
-    # 2. Raise ValueError if np.any(np.isnan(T)) or np.any(T < T_lo) or
-    #    np.any(T > T_hi). Include np.min(T), np.max(T), T_lo, T_hi and
-    #    surr["p"] in the message.
-    # Pitfall: if a solver keeps tripping this, the fix is a wider
-    #    fit_T_margin or a better initial guess, not removing the check.
-    # Check: T exactly at T_lo and T_hi passes; T_lo - 1e-9 raises; a (2, m)
-    #    array with one bad entry raises.
-    raise NotImplementedError
+
+    T = np.asarray(T, dtype = float)
+    T_lo = surr["T_lo"]
+    T_hi = surr["T_hi"]
+
+    # Detect any NaN or out of range temperature
+    invalid = (
+        np.any(np.isnan(T))
+        or np.any(T < T_lo)
+        or np.any(T > T_hi)
+    )
+
+    if invalid:
+        raise ValueError(
+            f"Temperature outside surrogate range or contains NaN: "
+            f"T_min={np.nanmin(T):.6g} K, "
+            f"T_max={np.nanmax(T):.6g} K, "
+            f"valid range=[{T_lo:.6g}, {T_hi:.6g}] K, "
+            f"p={surr['p']} Pa."
+        )
 
 
 def evaluate(surr, name, T):
@@ -712,20 +829,39 @@ def evaluate(surr, name, T):
     phi : ndarray, same shape as T
         Property value in SI units (see module docstring).
     """
+    if name not in ("cp", "mu", "k", "rho"):
+        raise ValueError(f"Unknown property {name!r} detected")
+
+    # Check temperature bound
+    check_range(surr, T)
+
+    # Scale temperature
+    T = np.asarray(T, dtype = float)
+    T_scaled = (T - surr["T_bar"]) / surr["dT"]
+
+    # Evaluate underlying surrogate model type (poly, cubicspline)
+    kind = surr["kind"]
+    coef = surr["coef"][name]
+
+
+    if kind == "poly":
+        phi = np.polynomial.polynomial.polyval(T_scaled, coef)
+    elif kind == "spline":
+        phi = coef(T_scaled)
+    else:
+        raise ValueError(f"Unknown surrogate kind: {kind!r}")
+
+    # Apply continuation blend to cp, mu, and k
+    lam = surr.get("lam", 1.0)
     
-    # 1. check_range(surr, T).
-    # 2. T~ = (T - T_bar)/dT.
-    # 3. kind "poly": phi = np.polynomial.polynomial.polyval(T~, coef[name])
-    #    (Horner's rule; works elementwise for any array shape).
-    #    kind "spline": phi = coef[name](T).
-    # 4. If name is in ("cp", "mu", "k") and lam != 1:
-    #    phi = (1 - lam) * mean[name] + lam * phi   (Eq 23).
-    # 5. Return phi with the same shape as T.
-    # Pitfall: never call CoolProp here. This function runs inside every
-    #    right-hand-side evaluation.
-    # Check: at the fit points the value matches coolprop_table to within
-    #    max_rel_err; shape (2, 7) in gives shape (2, 7) out.
-    raise NotImplementedError
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError(f"Continuation parameter lam={lam} is outside [0, 1].")
+
+    if name in ("cp", "mu", "k") and lam != 1.0:
+        phi = (1.0 - lam) * surr["mean"][name] + lam * phi
+
+    # 5. Preserve the input shape, including scalar inputs.
+    return np.asarray(phi).reshape(T.shape)
 
 
 def enthalpy(surr, T):
@@ -747,13 +883,22 @@ def enthalpy(surr, T):
     hhat : ndarray, same shape as T
         Specific enthalpy [J/kg] (only differences are physical).
     """
-    # 1. check_range(surr, T).
-    # 2. kind "poly": hhat = hhat_ref + dT * polyval((T - T_bar)/dT, hhat_coef).
-    #    kind "spline": hhat = hhat_ref + (antiderivative spline)(T) minus its
-    #    value at T_bar.
-    # 3. Ignore lam here (see continuation_surrogate).
-    # Check: (enthalpy(s, T + 1e-3) - enthalpy(s, T - 1e-3)) / 2e-3 equals
-    #    evaluate(s, "cp", T) to ~1e-8 relative; differences
-    #    enthalpy(s, T) - enthalpy(s, T_lo) match CoolProp HMASS differences
-    #    to within max_rel_err["hhat"].
-    raise NotImplementedError
+
+    # Validate temperature range
+    check_range(surr, T)
+    T = np.asarray(T, dtype = float)
+
+    # Determine hhat depending on the kind of surrogate model
+    kind = surr["kind"]
+    if kind == "poly":
+        hhat_ref, cp_integral, T_bar, dT = surr["coeff"]["hhat"]
+        T_scaled = (T - T_bar) / dT
+        hhat = hhat_ref + dT * np.polynomial.polynomial.polyval(T_scaled, cp_integral)
+
+    elif kind == "spline":
+        cp_integral, hhat_offset = surr["coef"]["hhat"]
+        hhat = cp_integral(T) + hhat_offsets
+    else:
+        raise ValueError(f"Unsupported type {kind}")
+
+    return np.asarray(hhat).reshape(T.shape)
