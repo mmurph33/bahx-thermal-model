@@ -76,7 +76,26 @@ def osf_geometry(s, b, t, l, W):
     # Check: hand-compute D_h for s = 1.525 mm, b = 6.25 mm, t = 0.102 mm,
     #    l = 3.175 mm (about 2.4 mm). Limit: for t -> 0 and l -> infinity,
     #    D_h -> 2 s b/(s + b), the parallel-channel value.
-    raise NotImplementedError
+    ratios = {
+        "alpha_mb": s / b,
+        "delta_mb": t / l,
+        "gamma_mb": t / s,
+    }
+    D_h = 4.0 * s * b * l / (2.0 * (s * l + b * l + t * b) + t * s)
+    n = 1.0 / (s + t)
+    A_ff = W * n * s * b
+    A_p = 2.0 * W * (1.0 - n * t)
+    A_f = 2.0 * W * n * b
+    return {
+        "s": s, "b": b, "t": t, "l": l, "W": W,
+        **ratios,
+        "D_h": D_h,
+        "n": n,
+        "A_ff": A_ff,
+        "A_p": A_p,
+        "A_f": A_f,
+        "A_prime": A_p + A_f,
+    }
 
 
 def exchanger_geometry(params):
@@ -106,7 +125,20 @@ def exchanger_geometry(params):
     # 3. C_m = rho_m c_m A_m.
     # Check: for the suggested fins and t_sheet = 1 mm, W = 1 m, the sheets
     #    dominate A_m (2e-3 m^2 against ~0.8e-3 m^2 of fins).
-    raise NotImplementedError
+    geom_h = osf_geometry(
+        params["s_h"], params["b_h"], params["t_fin_h"], params["l_h"], params["W"]
+    )
+    geom_c = osf_geometry(
+        params["s_c"], params["b_c"], params["t_fin_c"], params["l_c"], params["W"]
+    )
+    # Two parting sheets plus the fins of both passages.
+    A_m = params["W"] * (
+        2.0 * params["t_sheet"]
+        + geom_h["n"] * geom_h["t"] * geom_h["b"]
+        + geom_c["n"] * geom_c["t"] * geom_c["b"]
+    )
+    C_m = params["rho_m"] * params["c_m"] * A_m
+    return {"h": geom_h, "c": geom_c, "A_m": A_m, "C_m": C_m}
 
 
 def reynolds(mdot, mu, side_geom):
@@ -132,7 +164,8 @@ def reynolds(mdot, mu, side_geom):
     # 2. Re = G D_h / mu.
     # Check: base case G ~ 17 kg/(m^2 s), D_h ~ 2.4 mm, mu ~ 1.2e-5 Pa s
     #    gives Re ~ 3400 on the hot side.
-    raise NotImplementedError
+    G = mdot / side_geom["A_ff"]
+    return G * side_geom["D_h"] / mu
 
 
 def colburn_j(Re, alpha_mb, delta_mb, gamma_mb):
@@ -170,7 +203,22 @@ def colburn_j(Re, alpha_mb, delta_mb, gamma_mb):
     # Check: hand-compute j at Re = 3400 for the suggested fin
     #    (alpha = 0.244, delta = 0.032, gamma = 0.067); expect j ~ 0.009.
     #    j should fall smoothly with Re with no jump.
-    raise NotImplementedError
+    laminar_part = (
+        0.6522
+        * Re ** -0.5403
+        * alpha_mb ** -0.1541
+        * delta_mb ** 0.1499
+        * gamma_mb ** -0.0678
+    )
+    turbulent_bracket = (
+        1.0
+        + 5.269e-5
+        * Re ** 1.340
+        * alpha_mb ** 0.504
+        * delta_mb ** 0.456
+        * gamma_mb ** -1.055
+    ) ** 0.1
+    return laminar_part * turbulent_bracket
 
 
 def laminar_nusselt_rect(alpha_mb):
@@ -201,7 +249,13 @@ def laminar_nusselt_rect(alpha_mb):
     # 2. Evaluate with np.polynomial.polynomial.polyval(alpha, coeffs).
     # Check: a = 1 (square duct) gives Nu_T = 2.98, Nu_H1 = 3.61;
     #    a -> 0 (parallel plates) gives 7.54 and 8.24.
-    raise NotImplementedError
+    # A duct's aspect ratio is symmetric (s/b and b/s are the same duct), so
+    # fold alpha into (0, 1] before using the polynomial fit.
+    a = min(alpha_mb, 1.0 / alpha_mb)
+    # H1 boundary condition (axially uniform heat flux, peripherally uniform
+    # wall temperature), the usual choice for highly conductive aluminum fins.
+    coeffs_H1 = [8.235 * c for c in (1.0, -2.0421, 3.0853, -2.4765, 1.0578, -0.1861)]
+    return np.polynomial.polynomial.polyval(a, coeffs_H1)
 
 
 def heat_transfer_coefficient(mdot, cp, mu, k, side_geom):
@@ -239,7 +293,16 @@ def heat_transfer_coefficient(mdot, cp, mu, k, side_geom):
     #    value, never the initial one.
     # Check: base case h ~ 350-500 W/(m^2 K) on both sides. With mdot -> 0
     #    the result tends to h_lam (no division by zero, no negative h).
-    raise NotImplementedError
+    G = mdot / side_geom["A_ff"]
+    Re = reynolds(mdot, mu, side_geom)
+    # Floor Re so that mdot -> 0 gives a finite j; G = 0 then makes h_corr = 0
+    # and the laminar floor takes over (no division by zero, no NaN).
+    Re_safe = np.maximum(Re, 1.0e-12)
+    j = colburn_j(Re_safe, side_geom["alpha_mb"], side_geom["delta_mb"], side_geom["gamma_mb"])
+    Pr = cp * mu / k
+    h_corr = j * G * cp * Pr ** (-2.0 / 3.0)
+    h_lam = laminar_nusselt_rect(side_geom["alpha_mb"]) * k / side_geom["D_h"]
+    return np.maximum(h_corr, h_lam)
 
 
 def fin_efficiency(h, k_f, side_geom):
@@ -275,7 +338,13 @@ def fin_efficiency(h, k_f, side_geom):
     #    follow Eq 22 (the difference is ~1.6 % in m for the suggested fin).
     # Check: base case (h ~ 450, k_f = 180, t = 0.1 mm, b = 6.25 mm) gives
     #    m ell_f ~ 0.7 and eta_f ~ 0.86. Larger h or taller fins -> lower eta_f.
-    raise NotImplementedError
+    t = side_geom["t"]
+    m = np.sqrt(2.0 * h * (1.0 + t / side_geom["l"]) / (k_f * t))
+    ell_f = side_geom["b"] / 2.0
+    x = m * ell_f
+    # tanh(x)/x -> 1 as x -> 0; np.where guards the x == 0 (h = 0) case.
+    x_safe = np.where(x == 0.0, 1.0, x)
+    return np.where(x == 0.0, 1.0, np.tanh(x_safe) / x_safe)
 
 
 def surface_efficiency(eta_f, side_geom):
@@ -297,7 +366,7 @@ def surface_efficiency(eta_f, side_geom):
     """
     # 1. eta_o = 1 - (A_f / A_prime) (1 - eta_f).
     # Check: eta_f = 1 gives eta_o = 1; eta_f = 0 gives eta_o = A_p/A_prime.
-    raise NotImplementedError
+    return 1.0 - (side_geom["A_f"] / side_geom["A_prime"]) * (1.0 - eta_f)
 
 
 def side_conductance(T, mdot, surr, side_geom, k_f):
@@ -334,7 +403,13 @@ def side_conductance(T, mdot, surr, side_geom, k_f):
     #    conductance uses T_c and props["c"], never T_h.
     # Check: constant_surrogate input gives the same a for every T (a
     #    constant); base case a ~ 3-4 kW/(m K) per side.
-    raise NotImplementedError
+    cp = properties.evaluate(surr, "cp", T)
+    mu = properties.evaluate(surr, "mu", T)
+    k = properties.evaluate(surr, "k", T)
+    h = heat_transfer_coefficient(mdot, cp, mu, k, side_geom)
+    eta_f = fin_efficiency(h, k_f, side_geom)
+    eta_o = surface_efficiency(eta_f, side_geom)
+    return eta_o * h * side_geom["A_prime"]
 
 
 def conductances(T_h, T_c, mdot_h, mdot_c, params, props, geom):
@@ -365,7 +440,10 @@ def conductances(T_h, T_c, mdot_h, mdot_c, params, props, geom):
     # 2. a_c = side_conductance(T_c, mdot_c, props["c"], geom["c"], k_f).
     # Check: swapping the hot and cold inputs (with identical surrogates and
     #    geometry) swaps the outputs.
-    raise NotImplementedError
+    k_f = params["k_f"]
+    a_h = side_conductance(T_h, mdot_h, props["h"], geom["h"], k_f)
+    a_c = side_conductance(T_c, mdot_c, props["c"], geom["c"], k_f)
+    return a_h, a_c
 
 
 def overall_conductance(a_h, a_c):
@@ -386,4 +464,4 @@ def overall_conductance(a_h, a_c):
     # 1. U_prime = a_h a_c / (a_h + a_c) (same as 1/(1/a_h + 1/a_c), but
     #    with one division).
     # Check: a_h = a_c = a gives U' = a/2; a_c -> infinity gives U' -> a_h.
-    raise NotImplementedError
+    return a_h * a_c / (a_h + a_c)

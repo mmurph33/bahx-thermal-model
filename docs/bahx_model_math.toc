@@ -1,0 +1,47 @@
+\contentsline {section}{\numberline {1}Scope and modeling assumptions}{2}{section.1}%
+\contentsline {section}{\numberline {2}Nomenclature}{3}{section.2}%
+\contentsline {section}{\numberline {3}Steady-state model}{3}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Control-volume energy balances}{3}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Eliminating the wall temperature}{3}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Why this is a boundary value problem}{4}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Dimensionless form}{4}{subsection.3.4}%
+\contentsline {subsection}{\numberline {3.5}Constant-property analytical solution (verification case)}{4}{subsection.3.5}%
+\contentsline {subsection}{\numberline {3.6}Pressure-drop extension}{5}{subsection.3.6}%
+\contentsline {subsection}{\numberline {3.7}Heat duty and energy closure}{5}{subsection.3.7}%
+\contentsline {section}{\numberline {4}Closure relations}{5}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Offset strip fin geometry}{5}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Heat transfer and friction correlations}{6}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Fin and surface efficiency}{6}{subsection.4.3}%
+\contentsline {subsection}{\numberline {4.4}Thermophysical properties}{6}{subsection.4.4}%
+\contentsline {section}{\numberline {5}Numerical solution of the steady problem}{6}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Collocation with continuation}{6}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Shooting as a cross-check}{7}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Sizing by root finding}{7}{subsection.5.3}%
+\contentsline {subsection}{\numberline {5.4}Verification checklist}{7}{subsection.5.4}%
+\contentsline {section}{\numberline {6}Transient model}{7}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Governing equations}{7}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Time scales and stiffness}{8}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.3}Method of lines: finite-volume discretization}{8}{subsection.6.3}%
+\contentsline {paragraph}{Ordering and sparsity.}{8}{section*.2}%
+\contentsline {paragraph}{Numerical diffusion.}{8}{section*.3}%
+\contentsline {subsection}{\numberline {6.4}Quasi-steady gas reduction (fallback)}{9}{subsection.6.4}%
+\contentsline {subsection}{\numberline {6.5}Upset scenarios}{9}{subsection.6.5}%
+\contentsline {paragraph}{Feed temperature ramp.}{9}{section*.4}%
+\contentsline {paragraph}{Cold-stream trip.}{9}{section*.5}%
+\contentsline {subsection}{\numberline {6.6}ALPEMA comparison metrics}{9}{subsection.6.6}%
+\contentsline {section}{\numberline {7}Sensitivity analysis}{10}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Definitions}{10}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}Analytical check}{10}{subsection.7.2}%
+\contentsline {subsection}{\numberline {7.3}Finite differences}{10}{subsection.7.3}%
+\contentsline {subsection}{\numberline {7.4}Implicit differentiation through the shooting residual}{10}{subsection.7.4}%
+\contentsline {subsection}{\numberline {7.5}Forward sensitivity equations (transient)}{10}{subsection.7.5}%
+\contentsline {subsection}{\numberline {7.6}Smoothing the max operator}{11}{subsection.7.6}%
+\contentsline {section}{\numberline {8}Regression and uncertainty}{11}{section.8}%
+\contentsline {subsection}{\numberline {8.1}Fitting the Colburn factor}{11}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}Parameter confidence intervals}{11}{subsection.8.2}%
+\contentsline {subsection}{\numberline {8.3}Propagating uncertainty to model outputs}{11}{subsection.8.3}%
+\contentsline {subsection}{\numberline {8.4}Property surrogates}{12}{subsection.8.4}%
+\contentsline {section}{\numberline {9}Stretch goals}{12}{section.9}%
+\contentsline {subsection}{\numberline {9.1}Fastest admissible startup ramp}{12}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}Thermal stress estimate}{12}{subsection.9.2}%
+\contentsline {section}{\numberline {10}Map from course techniques to the project}{12}{section.10}%
