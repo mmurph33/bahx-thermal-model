@@ -228,7 +228,7 @@ def laminar_nusselt_rect(alpha_mb):
     Nu : float
         Fully developed laminar Nusselt number [-].
     """
-    
+
     # Nu_H1 = 8.235 (1 - 2.0421 a + 3.0853 a^2 - 2.4765 a^3 + 1.0578 a^4 - 0.1861 a^5)
     coeffs_H1 = [8.235 * c for c in (1.0, -2.0421, 3.0853, -2.4765, 1.0578, -0.1861)]
     return np.polynomial.polynomial.polyval(alpha_mb, coeffs_H1)
@@ -269,7 +269,21 @@ def heat_transfer_coefficient(mdot, cp, mu, k, side_geom):
     #    value, never the initial one.
     # Check: base case h ~ 350-500 W/(m^2 K) on both sides. With mdot -> 0
     #    the result tends to h_lam (no division by zero, no negative h).
-    raise NotImplementedError
+    
+    # Ensure no division by 0
+    Re_safe = np.maximum(Re, 1.0e-12)
+
+    # colburn j
+    j = colburn_j(Re_safe, side_geom["alpha_mb"], side_geom["delta_mb"], side_geom["gamma_mb"])
+
+    # Prandtl number
+    Pr = cp * mu / k
+
+    # heat transfer coefficient
+    h_corr = j * G * cp * Pr ** (-2.0 / 3.0)
+    h_lam = laminar_nusselt_rect(side_geom["alpha_mb"]) * k / side_geom["D_h"]
+
+    return np.maximum(h_corr, h_lam)
 
 
 def fin_efficiency(h, k_f, side_geom):
@@ -305,7 +319,16 @@ def fin_efficiency(h, k_f, side_geom):
     #    follow Eq 22 (the difference is ~1.6 % in m for the suggested fin).
     # Check: base case (h ~ 450, k_f = 180, t = 0.1 mm, b = 6.25 mm) gives
     #    m ell_f ~ 0.7 and eta_f ~ 0.86. Larger h or taller fins -> lower eta_f.
-    raise NotImplementedError
+
+    # Fin thickeness
+    t = side_geom["t"]
+    m = np.sqrt(2.0 * h * (1.0 + t / side_geom["l"]) / (k_f * t))
+
+    ell_f = side_geom["b"] / 2.0
+    x = m * ell_f
+    # tanh(x)/x -> 1 as x -> 0; np.where guards the x == 0 (h = 0) case.
+    x_safe = np.where(x == 0.0, 1.0, x)
+    return np.where(x == 0.0, 1.0, np.tanh(x_safe) / x_safe)
 
 
 def surface_efficiency(eta_f, side_geom):
@@ -325,9 +348,7 @@ def surface_efficiency(eta_f, side_geom):
     eta_o : ndarray, same shape as eta_f
         Overall surface efficiency [-].
     """
-    # 1. eta_o = 1 - (A_f / A_prime) (1 - eta_f).
-    # Check: eta_f = 1 gives eta_o = 1; eta_f = 0 gives eta_o = A_p/A_prime.
-    raise NotImplementedError
+    return 1.0 - (side_geom["A_f"] / side_geom["A_prime"]) * (1.0 - eta_f)
 
 
 def side_conductance(T, mdot, surr, side_geom, k_f):
@@ -354,17 +375,14 @@ def side_conductance(T, mdot, surr, side_geom, k_f):
     a : ndarray, same shape as T
         Side conductance per unit length [W/(m K)].
     """
-    # 1. cp, mu, k = properties.evaluate(surr, name, T) for each name. This
-    #    also enforces the fitted range.
-    # 2. h = heat_transfer_coefficient(mdot, cp, mu, k, side_geom).
-    # 3. eta_f = fin_efficiency(h, k_f, side_geom);
-    #    eta_o = surface_efficiency(eta_f, side_geom).
-    # 4. a = eta_o h A_prime.
-    # Pitfall: properties at this stream's temperature only. The cold-side
-    #    conductance uses T_c and props["c"], never T_h.
-    # Check: constant_surrogate input gives the same a for every T (a
-    #    constant); base case a ~ 3-4 kW/(m K) per side.
-    raise NotImplementedError
+    cp = properties.evaluate(surr, "cp", T)
+    mu = properties.evaluate(surr, "mu", T)
+    k = properties.evaluate(surr, "k", T)
+
+    h = heat_transfer_coefficient(mdot, cp, mu, k, side_geom)
+    eta_f = fin_efficiency(h, k_f, side_geom)
+    eta_o = surface_efficiency(eta_f, side_geom)
+    return eta_o * h * side_geom["A_prime"]
 
 
 def conductances(T_h, T_c, mdot_h, mdot_c, params, props, geom):
