@@ -162,7 +162,11 @@ def reynolds(mdot, mu, side_geom):
     # 2. Re = G D_h / mu.
     # Check: base case G ~ 17 kg/(m^2 s), D_h ~ 2.4 mm, mu ~ 1.2e-5 Pa s
     #    gives Re ~ 3400 on the hot side.
-    raise NotImplementedError
+
+    G = mdot / side_geom["A_ff"]
+    Re = G * side_geom["D_h"] / mu
+
+    return Re
 
 
 def colburn_j(Re, alpha_mb, delta_mb, gamma_mb):
@@ -184,23 +188,27 @@ def colburn_j(Re, alpha_mb, delta_mb, gamma_mb):
     j : ndarray, same shape as Re
         Colburn factor [-].
     """
-    # 1. Laminar part: 0.6522 Re^-0.5403 alpha^-0.1541 delta^0.1499 gamma^-0.0678.
-    # 2. Turbulent bracket: [1 + 5.269e-5 Re^1.340 alpha^0.504 delta^0.456
-    #    gamma^-1.055]^0.1.
-    # 3. j = product. Use np.power / ** on arrays; no loops.
-    # Pitfall: confirm the coefficients and the stated validity range (Re
-    #    roughly 120 to 1e4, and ranges of alpha, delta, gamma) against the
-    #    1995 paper before the final report (CLAUDE.md team note). Outside the
-    #    Re range, warn or rely on the laminar floor in
-    #    heat_transfer_coefficient.
-    # Pitfall: do not copy the j formula from the proposal; it has
-    #    transcription errors (alpha^-0.541, gamma^+0.0678, 5.29e-5 and
-    #    gamma^+1.055 should be alpha^-0.1541, gamma^-0.0678, 5.269e-5 and
-    #    gamma^-1.055). Use Eq 19 as written above (it matches CLAUDE.md).
-    # Check: hand-compute j at Re = 3400 for the suggested fin
-    #    (alpha = 0.244, delta = 0.032, gamma = 0.067); expect j ~ 0.009.
-    #    j should fall smoothly with Re with no jump.
-    raise NotImplementedError
+
+    # Laminar
+    laminar_part = (
+        0.6522 
+        * Re ** -0.5403
+        * alpha_mb ** -0.1541
+        * delta_mb ** 0.1499
+        * gamma_mb ** -0.0678
+    )
+
+    # Turbulent
+    turblent_part = (
+        1.0
+        + 5.269e-5
+        * Re ** 1.340
+        * alpha_mb ** 0.504
+        * delta_mb ** 0.456
+        * gamma_mb ** -1.055
+    ) ** 0.1
+
+    return laminar_part * turbulent_part
 
 
 def laminar_nusselt_rect(alpha_mb):
@@ -220,18 +228,10 @@ def laminar_nusselt_rect(alpha_mb):
     Nu : float
         Fully developed laminar Nusselt number [-].
     """
-    # 1. The math doc does not say which thermal boundary condition to use
-    #    (flagged). Shah & London give polynomial fits in alpha for:
-    #      constant wall temperature (T):
-    #        Nu_T  = 7.541 (1 - 2.610 a + 4.970 a^2 - 5.119 a^3 + 2.702 a^4 - 0.548 a^5)
-    #      axially uniform heat flux, peripherally uniform wall temperature (H1):
-    #        Nu_H1 = 8.235 (1 - 2.0421 a + 3.0853 a^2 - 2.4765 a^3 + 1.0578 a^4 - 0.1861 a^5)
-    #    Verify these coefficients in Shah & Sekulic (2003) before use; H1 is
-    #    the usual choice for highly conductive aluminum fins.
-    # 2. Evaluate with np.polynomial.polynomial.polyval(alpha, coeffs).
-    # Check: a = 1 (square duct) gives Nu_T = 2.98, Nu_H1 = 3.61;
-    #    a -> 0 (parallel plates) gives 7.54 and 8.24.
-    raise NotImplementedError
+    
+    # Nu_H1 = 8.235 (1 - 2.0421 a + 3.0853 a^2 - 2.4765 a^3 + 1.0578 a^4 - 0.1861 a^5)
+    coeffs_H1 = [8.235 * c for c in (1.0, -2.0421, 3.0853, -2.4765, 1.0578, -0.1861)]
+    return np.polynomial.polynomial.polyval(alpha_mb, coeffs_H1)
 
 
 def heat_transfer_coefficient(mdot, cp, mu, k, side_geom):
