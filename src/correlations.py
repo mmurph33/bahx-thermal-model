@@ -409,11 +409,11 @@ def conductances(T_h, T_c, mdot_h, mdot_c, params, props, geom):
     a_h, a_c : ndarray, same shape as T_h
         Side conductances per unit length [W/(m K)].
     """
-    # 1. a_h = side_conductance(T_h, mdot_h, props["h"], geom["h"], k_f).
-    # 2. a_c = side_conductance(T_c, mdot_c, props["c"], geom["c"], k_f).
-    # Check: swapping the hot and cold inputs (with identical surrogates and
-    #    geometry) swaps the outputs.
-    raise NotImplementedError
+
+    k_f = params["k_f"]
+    a_h = side_conductance(T_h, mdot_h, props["h"], geom["h"], k_f)
+    a_c = side_conductance(T_c, mdot_c, props["c"], geom["c"], k_f)
+    return a_h, a_c
 
 
 def overall_conductance(a_h, a_c):
@@ -434,4 +434,4 @@ def overall_conductance(a_h, a_c):
     # 1. U_prime = a_h a_c / (a_h + a_c) (same as 1/(1/a_h + 1/a_c), but
     #    with one division).
     # Check: a_h = a_c = a gives U' = a/2; a_c -> infinity gives U' -> a_h.
-    raise NotImplementedError
+    return a_h * a_c / (a_h + a_c)
