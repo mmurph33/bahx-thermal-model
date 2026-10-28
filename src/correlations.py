@@ -32,7 +32,7 @@ The side_geom dict (one per side; geom = {"h": ..., "c": ..., "A_m": ..., "C_m":
 
 import numpy as np
 
-from src import properties
+import properties
 
 
 def osf_geometry(s, b, t, l, W):
