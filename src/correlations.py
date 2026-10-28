@@ -431,7 +431,5 @@ def overall_conductance(a_h, a_c):
     U_prime : ndarray, same shape
         Overall conductance per unit length [W/(m K)].
     """
-    # 1. U_prime = a_h a_c / (a_h + a_c) (same as 1/(1/a_h + 1/a_c), but
-    #    with one division).
-    # Check: a_h = a_c = a gives U' = a/2; a_c -> infinity gives U' -> a_h.
+    
     return a_h * a_c / (a_h + a_c)
