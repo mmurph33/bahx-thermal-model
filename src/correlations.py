@@ -60,23 +60,38 @@ def osf_geometry(s, b, t, l, W):
     side_geom : dict
         Keys listed in the module docstring.
     """
-    # 1. Ratios: alpha_mb = s/b, delta_mb = t/l, gamma_mb = t/s   (Eq 17).
-    # 2. Hydraulic diameter D_h = 4 s b l / [2(s l + b l + t b) + t s]   (Eq 17).
-    #    (The paper writes h for fin height; we write b.)
-    # 3. Fins per unit width n = 1/(s + t).
-    # 4. Eq 18, per passage:
-    #      A_ff = W n s b            free-flow area (n W channels of s by b)
-    #      A_p  = 2 W (1 - n t)      primary area per unit length; the factor 2
-    #                                counts both parting sheets bounding the
-    #                                passage, minus the fin footprints
-    #      A_f  = 2 W n b            fin area per unit length (two faces per fin)
-    #      A_prime = A_p + A_f
-    # 5. Return everything (including the inputs s, b, t, l, W, which
-    #    fin_efficiency needs) in one dict.
-    # Check: hand-compute D_h for s = 1.525 mm, b = 6.25 mm, t = 0.102 mm,
-    #    l = 3.175 mm (about 2.4 mm). Limit: for t -> 0 and l -> infinity,
-    #    D_h -> 2 s b/(s + b), the parallel-channel value.
-    raise NotImplementedError
+    ratios = {
+        "alpha_mb": s/b,
+        "delta_mb": t/l,
+        "gamma_mb": t/s
+    }
+
+    # Hydraulic diameter
+    D_h = 4.0 * s*b*l / (2.0 * (s*l + b*l + t*b) + t*s)
+
+    # Fins per unit width
+    n = 1.0 / (s + t)
+
+    # Free flow area
+    A_ff = W * n * s * b
+
+    # Primary area per unit length
+    # Factor of 2 account both parting sheets
+    A_p = 2.0 * W * (1.0 - n * t)
+
+    # Fin area per unit length (two face per fin)
+    A_f = 2.0 * W * n * b
+
+    return {
+        "s": s, "b": b, "t": t, "l": l, "W": W,
+        **ratios,
+        "D_h": D_h,
+        "n": n,
+        "A_ff": A_ff,
+        "A_p": A_p,
+        "A_f": A_f,
+        "A_prime": A_p + A_f,
+    }
 
 
 def exchanger_geometry(params):
@@ -99,14 +114,29 @@ def exchanger_geometry(params):
         "A_m": metal cross-section of one repeating unit [m^2],
         "C_m": metal heat capacity per unit length C'_m [J/(m K)].
     """
-    # 1. geom_h = osf_geometry(s_h, b_h, t_fin_h, l_h, W); same for the cold side.
-    # 2. Metal cross-section of the repeating unit (two parting sheets plus the
-    #    fins of both passages):
-    #      A_m = W [2 t_sheet + n_h t_fin_h b_h + n_c t_fin_c b_c]
-    # 3. C_m = rho_m c_m A_m.
-    # Check: for the suggested fins and t_sheet = 1 mm, W = 1 m, the sheets
-    #    dominate A_m (2e-3 m^2 against ~0.8e-3 m^2 of fins).
-    raise NotImplementedError
+
+    # Geometry for the hot side
+    geom_h = osf_geometry(
+        params["s_h"], params["b_h"], params["t_fin_h"], params["l_h"], params["W"]
+    )
+
+    # Geometry for the cold side
+    geom_c = osf_geometry(
+        params["s_c"], params["b_c"], params["t_fin_c"], params["l_c"], params["W"]
+    )
+
+    # Two parting sheets plus the fins of both passages.
+    # Metal  corss-section of the repeating unit
+    A_m = params["W"] * (
+        2.0 * params["t_sheet"]
+        + geom_h["n"] * geom_h["t"] * geom_h["b"]
+        + geom_c["n"] * geom_c["t"] * geom_c["b"]
+    )
+
+    # Total metal heat capacity
+    C_m = params["rho_m"] * params["c_m"] * A_m
+
+    return {"h": geom_h, "c": geom_c, "A_m": A_m, "C_m": C_m}
 
 
 def reynolds(mdot, mu, side_geom):
