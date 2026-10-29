@@ -52,10 +52,8 @@ def wall_temperature(T_h, T_c, a_h, a_c):
     T_w : ndarray, same shape
         Wall temperature [K].
     """
-    # 1. T_w = (a_h T_h + a_c T_c) / (a_h + a_c).
-    # Check: a_h = a_c gives the arithmetic mean; the stream-to-metal
-    #    differences satisfy Eq 5, e.g. T_h - T_w = a_c/(a_h + a_c) (T_h - T_c).
-    raise NotImplementedError
+
+    return (a_h * T_h + a_c * T_c) / (a_h + a_c)
 
 
 def effectiveness(NTU, C_r):
@@ -76,15 +74,16 @@ def effectiveness(NTU, C_r):
     eps : float
         Effectiveness Q/Q_max [-].
     """
-    # 1. If C_r == 1 exactly: return NTU/(1 + NTU).
-    # 2. Otherwise k = NTU (1 - C_r) and one_minus_E = -np.expm1(-k) (accurate
-    #    when k is small, where 1 - exp(-k) would lose digits to cancellation).
-    # 3. eps = one_minus_E / (one_minus_E + (1 - C_r) E), which is Eq 13 with
-    #    the denominator 1 - C_r E rewritten as (1 - E) + (1 - C_r) E so that
-    #    it stays accurate as C_r -> 1.
-    # Check: C_r = 0 gives 1 - exp(-NTU); C_r = 1 - 1e-9 agrees with C_r = 1
-    #    to ~1e-9; NTU = 3, C_r = 0.5 gives 0.8744.
-    raise NotImplementedError
+
+    if C_r == 1:
+        return NTU / (1 + NTU)
+
+    k = NTU * (1 - C_r)
+
+    one_minus_E = -np.expm1(-k) # np.expm1 = 1 - np.exp(-k)
+    E = np.exp(-k)
+    eps = ome_minus_E / (one_minus_E + (1 - C_r) * E)
+    return eps
 
 
 def analytical_profiles(x, L, T_h_in, T_c_in, C_h, C_c, U_prime):
@@ -119,21 +118,25 @@ def analytical_profiles(x, L, T_h_in, T_c_in, C_h, C_c, U_prime):
     T_h, T_c : ndarray, shape (n,)
         Temperature profiles [K].
     """
-    # 1. xi = x/L; NTU_h = U'L/C_h; NTU_c = U'L/C_c; k = NTU_h - NTU_c.
-    # 2. g(z) = -np.expm1(-k z)/k, accurate for small k. If |k| < ~1e-12
-    #    (balanced flow), use the limit g(z) = z instead of dividing by k.
-    # 3. Delta_0 = 1/(np.exp(-k) + NTU_h g(1)).
-    # 4. theta_h = 1 - NTU_h Delta_0 g(xi); theta_c = theta_h - Delta_0 exp(-k xi).
-    # 5. Back to kelvin: T = T_c_in + theta (T_h_in - T_c_in).
-    # Pitfall: the largest T_h - T_c (Eq 14) is at the warm end (x = 0) only
-    #    when hot is C_min. When cold is C_min (the base case), it is at the
-    #    cold end (x = L). Its value is Delta_0 (T_h_in - T_c_in) either way.
-    # Check: theta_h(0) = 1 and theta_c(1) = 0 to round-off; the effectiveness
-    #    C_h (1 - theta_h(1))/C_min equals effectiveness(NTU, C_r) from Eq 13
-    #    for hot = C_min, cold = C_min and C_r = 1; at C_r = 1 both profiles are
-    #    straight lines with Delta_0 = 1/(1 + NTU); results at C_r = 1 +- 1e-9
-    #    are continuous.
-    raise NotImplementedError
+
+    x = np.asarray(x)
+    xi = x / L
+    NTU_h = U_prime * L / C_h
+    NTU_c = U_prime * L / C_c
+    k = NTU_h - NTU_c
+
+    def g(z):
+        if abs(k) < 1e-12:
+            return z # prevent division by very small k
+        return -np.expm1(-k*z) / k
+
+    Delta_0 = 1 / (np.exp(-k) + NTU_h * g(1))
+    theta_h = 1 - NTU_h * Delta_0 * g(xi)
+    theta_c = theta_h - Delta_0 * np.exp(-k * xi)
+
+    T_h = T_c_in + theta_h * (T_h_in - T_c_in)
+    T_c = T_c_in + theta_c * (T_h_in - T_c_in)
+    return T_h, T_c
 
 
 def steady_rhs(x, y, params, props, geom):
@@ -163,25 +166,23 @@ def steady_rhs(x, y, params, props, geom):
     dydx : ndarray, same shape as y
         [dT_h/dx, dT_c/dx] [K/m].
     """
-    # 1. T_h = y[0], T_c = y[1] (shape (m,) or scalar).
-    # 2. a_h, a_c = correlations.conductances(T_h, T_c, mdot_h, mdot_c,
-    #    params, props, geom); U' = correlations.overall_conductance(a_h, a_c).
-    # 3. Local heat flow per unit length q' = U' (T_h - T_c)   (Eq 4).
-    # 4. cp_h = properties.evaluate(props["h"], "cp", T_h);
-    #    cp_c = properties.evaluate(props["c"], "cp", T_c). The cold cp is at
-    #    T_c, never T_h (CLAUDE.md; the proposal's cold balance writes
-    #    C_p,c(T_h), which is a typo).
-    # 5. dT_h/dx = -q'/(mdot_h cp_h); dT_c/dx = -q'/(mdot_c cp_c).
-    #    BOTH are negative. The cold sign is negative because the cold stream
-    #    flows in -x: it is heated as it moves toward x = 0, so its
-    #    temperature falls with x (Eq 2).
-    # 6. Return np.vstack((dT_h/dx, dT_c/dx)) (or np.array([...]) for shape
-    #    (2,)). solve_bvp requires the full (2, m) array: never loop over
-    #    mesh points.
-    # Pitfall: never call CoolProp here; only properties.evaluate.
-    # Check: with constant surrogates, steady_rhs at the analytical profile
-    #    equals the analytical derivative; at T_h == T_c it returns zeros.
-    raise NotImplementedError
+
+    T_h = y[0]
+    T_c = y[1]
+
+    a_h, a_c = correlations.conductances(
+        T_,h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
+    )
+
+    U_prime = correlations.overall_conductance(a_h, a_c)
+    q_prime = U_prime * (T_h - T_c) # local heat flow per unit length
+
+    cp_h = properties.evaluate(props["h"], "cp", T_h)
+    cp_c = properties.evaulate(props["c"], "cp", T_c)
+
+    dT_h_dx = -q_prime / (params["mdot_h"] * cp_h)
+    dT_c_dx = -q_prime / (params["mdot_c"] * cp_c)
+    return np.vstack((dT_h_dx, dT_c_dx))
 
 
 def steady_bc(ya, yb, T_h_in, T_c_in):
