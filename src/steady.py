@@ -52,10 +52,8 @@ def wall_temperature(T_h, T_c, a_h, a_c):
     T_w : ndarray, same shape
         Wall temperature [K].
     """
-    # 1. T_w = (a_h T_h + a_c T_c) / (a_h + a_c).
-    # Check: a_h = a_c gives the arithmetic mean; the stream-to-metal
-    #    differences satisfy Eq 5, e.g. T_h - T_w = a_c/(a_h + a_c) (T_h - T_c).
-    raise NotImplementedError
+
+    return (a_h * T_h + a_c * T_c) / (a_h + a_c)
 
 
 def effectiveness(NTU, C_r):
@@ -76,15 +74,16 @@ def effectiveness(NTU, C_r):
     eps : float
         Effectiveness Q/Q_max [-].
     """
-    # 1. If C_r == 1 exactly: return NTU/(1 + NTU).
-    # 2. Otherwise k = NTU (1 - C_r) and one_minus_E = -np.expm1(-k) (accurate
-    #    when k is small, where 1 - exp(-k) would lose digits to cancellation).
-    # 3. eps = one_minus_E / (one_minus_E + (1 - C_r) E), which is Eq 13 with
-    #    the denominator 1 - C_r E rewritten as (1 - E) + (1 - C_r) E so that
-    #    it stays accurate as C_r -> 1.
-    # Check: C_r = 0 gives 1 - exp(-NTU); C_r = 1 - 1e-9 agrees with C_r = 1
-    #    to ~1e-9; NTU = 3, C_r = 0.5 gives 0.8744.
-    raise NotImplementedError
+
+    if C_r == 1:
+        return NTU / (1 + NTU)
+
+    k = NTU * (1 - C_r)
+
+    one_minus_E = -np.expm1(-k) # np.expm1 = 1 - np.exp(-k)
+    E = np.exp(-k)
+    eps = ome_minus_E / (one_minus_E + (1 - C_r) * E)
+    return eps
 
 
 def analytical_profiles(x, L, T_h_in, T_c_in, C_h, C_c, U_prime):
@@ -119,21 +118,25 @@ def analytical_profiles(x, L, T_h_in, T_c_in, C_h, C_c, U_prime):
     T_h, T_c : ndarray, shape (n,)
         Temperature profiles [K].
     """
-    # 1. xi = x/L; NTU_h = U'L/C_h; NTU_c = U'L/C_c; k = NTU_h - NTU_c.
-    # 2. g(z) = -np.expm1(-k z)/k, accurate for small k. If |k| < ~1e-12
-    #    (balanced flow), use the limit g(z) = z instead of dividing by k.
-    # 3. Delta_0 = 1/(np.exp(-k) + NTU_h g(1)).
-    # 4. theta_h = 1 - NTU_h Delta_0 g(xi); theta_c = theta_h - Delta_0 exp(-k xi).
-    # 5. Back to kelvin: T = T_c_in + theta (T_h_in - T_c_in).
-    # Pitfall: the largest T_h - T_c (Eq 14) is at the warm end (x = 0) only
-    #    when hot is C_min. When cold is C_min (the base case), it is at the
-    #    cold end (x = L). Its value is Delta_0 (T_h_in - T_c_in) either way.
-    # Check: theta_h(0) = 1 and theta_c(1) = 0 to round-off; the effectiveness
-    #    C_h (1 - theta_h(1))/C_min equals effectiveness(NTU, C_r) from Eq 13
-    #    for hot = C_min, cold = C_min and C_r = 1; at C_r = 1 both profiles are
-    #    straight lines with Delta_0 = 1/(1 + NTU); results at C_r = 1 +- 1e-9
-    #    are continuous.
-    raise NotImplementedError
+
+    x = np.asarray(x)
+    xi = x / L
+    NTU_h = U_prime * L / C_h
+    NTU_c = U_prime * L / C_c
+    k = NTU_h - NTU_c
+
+    def g(z):
+        if abs(k) < 1e-12:
+            return z # prevent division by very small k
+        return -np.expm1(-k*z) / k
+
+    Delta_0 = 1 / (np.exp(-k) + NTU_h * g(1))
+    theta_h = 1 - NTU_h * Delta_0 * g(xi)
+    theta_c = theta_h - Delta_0 * np.exp(-k * xi)
+
+    T_h = T_c_in + theta_h * (T_h_in - T_c_in)
+    T_c = T_c_in + theta_c * (T_h_in - T_c_in)
+    return T_h, T_c
 
 
 def steady_rhs(x, y, params, props, geom):
@@ -163,25 +166,23 @@ def steady_rhs(x, y, params, props, geom):
     dydx : ndarray, same shape as y
         [dT_h/dx, dT_c/dx] [K/m].
     """
-    # 1. T_h = y[0], T_c = y[1] (shape (m,) or scalar).
-    # 2. a_h, a_c = correlations.conductances(T_h, T_c, mdot_h, mdot_c,
-    #    params, props, geom); U' = correlations.overall_conductance(a_h, a_c).
-    # 3. Local heat flow per unit length q' = U' (T_h - T_c)   (Eq 4).
-    # 4. cp_h = properties.evaluate(props["h"], "cp", T_h);
-    #    cp_c = properties.evaluate(props["c"], "cp", T_c). The cold cp is at
-    #    T_c, never T_h (CLAUDE.md; the proposal's cold balance writes
-    #    C_p,c(T_h), which is a typo).
-    # 5. dT_h/dx = -q'/(mdot_h cp_h); dT_c/dx = -q'/(mdot_c cp_c).
-    #    BOTH are negative. The cold sign is negative because the cold stream
-    #    flows in -x: it is heated as it moves toward x = 0, so its
-    #    temperature falls with x (Eq 2).
-    # 6. Return np.vstack((dT_h/dx, dT_c/dx)) (or np.array([...]) for shape
-    #    (2,)). solve_bvp requires the full (2, m) array: never loop over
-    #    mesh points.
-    # Pitfall: never call CoolProp here; only properties.evaluate.
-    # Check: with constant surrogates, steady_rhs at the analytical profile
-    #    equals the analytical derivative; at T_h == T_c it returns zeros.
-    raise NotImplementedError
+
+    T_h = y[0]
+    T_c = y[1]
+
+    a_h, a_c = correlations.conductances(
+        T_,h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
+    )
+
+    U_prime = correlations.overall_conductance(a_h, a_c)
+    q_prime = U_prime * (T_h - T_c) # local heat flow per unit length
+
+    cp_h = properties.evaluate(props["h"], "cp", T_h)
+    cp_c = properties.evaulate(props["c"], "cp", T_c)
+
+    dT_h_dx = -q_prime / (params["mdot_h"] * cp_h)
+    dT_c_dx = -q_prime / (params["mdot_c"] * cp_c)
+    return np.vstack((dT_h_dx, dT_c_dx))
 
 
 def steady_bc(ya, yb, T_h_in, T_c_in):
@@ -204,11 +205,8 @@ def steady_bc(ya, yb, T_h_in, T_c_in):
     residual : ndarray, shape (2,)
         [T_h(0) - T_h_in, T_c(L) - T_c_in] [K].
     """
-    # 1. Return np.array([ya[0] - T_h_in, yb[1] - T_c_in]).
-    # Pitfall: the hot condition uses ya (x = 0) and the cold condition uses
-    #    yb (x = L). Swapping them gives a parallel-flow exchanger.
-    # Check: the analytical profiles give a zero residual.
-    raise NotImplementedError
+
+    return np.array([ya[0] - T_h_in, yb[1] - T_c_in])
 
 
 def initial_guess(x, params, props, geom):
@@ -234,16 +232,27 @@ def initial_guess(x, params, props, geom):
     y_guess : ndarray, shape (2, m)
         [T_h, T_c] at the mesh points [K].
     """
-    # 1. props0 = {side: properties.continuation_surrogate(props[side], 0.0)}:
-    #    every property is now its mean value, so a_h, a_c are constants.
-    # 2. a_h, a_c from correlations.conductances at any in-range temperatures
-    #    (e.g. the surrogates' T_bar), then U' = overall_conductance(a_h, a_c).
-    # 3. C_h = mdot_h * mean cp_h, C_c = mdot_c * mean cp_c.
-    # 4. T_h, T_c = analytical_profiles(x, L, T_h_in, T_c_in, C_h, C_c, U').
-    # 5. Return np.vstack((T_h, T_c)).
-    # Check: steady_bc(y_guess[:, 0], y_guess[:, -1], ...) is zero; both rows
-    #    decrease with x.
-    raise NotImplementedError
+
+    props0 = {}
+    for side in ("h", "c"):
+        props0["side"] = properties.continuation_surrogate(props["side"], 0,0)
+
+    T_bar_h = props0["h"]["T_bar"]
+    T_bar_c = props0["c"]["T_bar"]
+
+    a_h, a_c = correlations.conductances(
+        T_bar,h, T_bar_c, params["mdot_h"], params["mdot_c"], params, props, geom
+    )
+
+    U_prime = correlations.overall_conductances(a_h, a_c)
+    C_h = params["mdot_h"] * properties.evaulate(props0["h"], "cp", T_bar_h)
+    C_c = params["mdot_c"] * properties.evaulate(props0["c"], "cp", T_bar_c)
+
+    T_h, T_c = analytical_profiles(
+        x, params["L"], params["T_h_in"], params["T_c_in"], C_h, C_c, U_prime
+    )
+
+    return np.vstack((T_h, T_c))
 
 
 def solve_steady(params, props):
@@ -272,30 +281,152 @@ def solve_steady(params, props):
         If the solve fails even with continuation. Report sol.message; do not
         retry with a looser tolerance (CLAUDE.md).
     """
-    # 1. geom = correlations.exchanger_geometry(params) (build it here so a
-    #    perturbed params never meets a stale geometry).
-    # 2. Initial mesh x0 = np.linspace(0, L, ~50); y0 = initial_guess(x0, ...).
-    # 3. Wrap the RHS and BCs for scipy:
-    #      fun(x, y) = steady_rhs(x, y, params, props, geom)
-    #      bc(ya, yb) = steady_bc(ya, yb, T_h_in, T_c_in)
-    # 4. sol = solve_bvp(fun, bc, x0, y0, tol=bvp_tol, max_nodes=bvp_max_nodes).
-    #    tol is a relative tolerance on the collocation residual, not on T
-    #    itself, which is why tests tighten it to 1e-8.
-    # 5. If sol.status != 0: continuation. For lam in continuation_lams:
-    #    props_lam = {side: properties.continuation_surrogate(props[side], lam)},
-    #    solve from the previous solution (x = sol.x, y = sol.y). Stop with
-    #    RuntimeError if any step fails.
-    # 6. Post-process on x = np.linspace(0, L, n_out): T_h, T_c = sol.sol(x)
-    #    (the dense, C1-continuous collocation interpolant); a_h, a_c from
-    #    correlations.conductances; U' = overall_conductance(a_h, a_c);
-    #    T_w = wall_temperature(T_h, T_c, a_h, a_c).
-    # 7. Return the dict with sol and method = "collocation".
-    # Pitfall: if properties.check_range raises during the solve, the iterate
-    #    left the fitted range. Widen fit_T_margin or improve the guess;
-    #    never remove the check.
-    # Check: tests/test_steady.py (constant properties vs epsilon-NTU, energy
-    #    closure, collocation vs shooting).
-    raise NotImplementedError
+
+    # Get geometry and boundary conditions
+    geom = correlations.exhcanger_geometry(params)
+    L = params["L"]
+    T_h_in = params["T_h_in"]
+    T_c_in = params["T_c_in"]
+
+    # Check continuation_lamdha is valid
+    if len(params["continuation_lams"]) == 0 or params["continuation_lams"][-1] != 1.0:
+        raise ValueError("continuation_lams must be non-empty and end at 1.0")
+
+    # Solve the bvp for given properties and mesh
+    def collocate(props_lam, x_mesh, y_mesh):
+        # Define rhs and lhs of the equation
+        def rhs(x,y):
+            return steady_rhs(x,y,params,props_lam, geom)
+
+        def bc(ya,yb):
+            return steady_bc(ya, yb, T_h_in, T_c_in)
+
+        # Find solution to bvp
+        sol = solve_bvp(
+            rhs, 
+            bc,
+            x_mesh,
+            y_mesh,
+            tol = params["bvp_tol"], # tolerance
+            max_nodes = params["bvp_max_nodes"]
+        )
+
+        return sol
+
+    x0 = np.linspace(0.0, L)
+    y0 = initial_guess(x0, params, props, geom)
+
+    # First, try full, temperature-dependent properties
+    try:
+        solution = collocate(props, x0, y0)
+        converged = solution.status == 0
+    except ValueError:
+        converged = False # solution failed to converge 
+
+    # If the solution failed to converged, switch to continuation model
+    if not converged:
+        x_mesh = x0
+        y_mesh = y0
+
+        for lam in params["continuation_lams"]:
+            # Build property set for current parameters
+            props_lam = {
+                side: properties.continuation_surrogate(props[side], lam)
+            }
+
+            # Solve using current properties and previous mesh & solution
+            try:
+                solution = collocate(props_lam, x_mesh, y_mesh)
+            except ValueError as err:
+                raise RuntimeError(
+                    f"Steady State BVP: property range error at "
+                    f"lambda = {lam}: {err}"
+                ) from err
+
+            if solution.status != 0:
+                raise RuntimeError(
+                    f"Steady State BVP did not converge at "
+                    f"lambda = {lam}: {solution.message}"
+                )
+
+            # Update mesh
+            x_mesh = solution.x
+            y_mesh = solution.y
+
+        x = np.linspace(0.0, L, params["n_out"])
+        T_h, T_c = sol.sol(x)
+        a_h, a_c = correlations.conductances(
+            T_h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
+        )
+        U_prime = correlations.overall_conductance(a_h, a_c)
+        T_w = wall_temperature(T_h, T_c, a_h, a_c)
+        return {
+            "x": x,
+            "T_h": T_h,
+            "T_c": T_c,
+            "T_w": T_w,
+            "a_h": a_h,
+            "a_c": a_c,
+            "U_prime": U_prime,
+            "sol": sol,
+            "method": "collocation"
+        }
+
+def _integrate_from_x0(sigma, params, props, geom, dense_output, stop_if_cold_too_low):
+    """Integrate Eq 6 from x = 0 with y(0) = [T_h_in, sigma] (shooting helper).
+
+    Shared by shooting_residual (no dense output) and solve_steady_shooting
+    (dense output for the final profiles). With stop_if_cold_too_low, a
+    terminal event stops the integration as soon as the cold stream falls to
+    T_c_in. The cold stream only cools along +x, so if that happens before
+    x = L the trial sigma is too low (T_c(L) < T_c_in), and the integration
+    must stop there: left running, T_c would fall out of the surrogate range
+    and properties.check_range would raise. The event sits at T_c_in, not at
+    the bottom of the surrogate range, because the integrator's trial steps
+    overshoot an event by up to a few K before the crossing is detected; the
+    fit margin below T_c_in absorbs that overshoot.
+
+    The final integration at the root sigma* turns the event off: there
+    T_c(L) = T_c_in to within the root tolerance, so the event can fire a
+    hair before x = L by round-off alone, and the profile is wanted all the
+    way to x = L.
+
+    Parameters
+    ----------
+    sigma : float
+        Trial cold outlet temperature T_c(0) [K].
+    params, props, geom : dict
+        As for steady_rhs.
+    dense_output : bool
+        Whether to return a continuous interpolant (sol.sol).
+    stop_if_cold_too_low : bool
+        Whether to stop at the event described above.
+
+    Returns
+    -------
+    sol : scipy OdeResult
+        sol.status == 1 means the event fired before x = L.
+    """
+
+    T_c_in = params["T_c_in"]
+
+    # Terminal event when T_c reaches bottom of cold surrogate model's range
+    def cold_reaches_inlet_temperature(x, y):
+        return y[1] - T_c_in
+
+    cold_reaches_inlet_temperature.terminal = True
+    cold_reaches_inlet_temperature.direction = -1
+
+    return solve_ivp(
+        lambda x, y: steady_rhs(x, y, params, props, geom),
+        (0.0, params["L"]),
+        [params["T_h_in"], sigma],
+        method="LSODA",
+        rtol=1.0e-10,
+        atol=1.0e-8,
+        events=cold_reaches_inlet_temperature if stop_if_cold_too_low else None,
+        dense_output=dense_output,
+    )
 
 
 def shooting_residual(sigma, params, props, geom):
@@ -321,21 +452,19 @@ def shooting_residual(sigma, params, props, geom):
         Residual [K]. Negative means sigma is too low (T_c falls below T_c_in
         before x = L).
     """
-    # 1. Integrate with solve_ivp(fun=lambda x, y: steady_rhs(x, y, ...),
-    #    t_span=(0, L), y0=[T_h_in, sigma]), method "LSODA" or "Radau",
-    #    rtol ~ 1e-10, atol ~ 1e-8. Tight tolerances matter: the map
-    #    sigma -> T_c(L) is very sensitive at large NTU (1 - C_r).
-    # 2. Add a terminal event that fires when T_c reaches the bottom of the
-    #    cold surrogate's range (event(x, y) = y[1] - surr_c["T_lo"],
-    #    event.terminal = True, event.direction = -1). A trial sigma that is
-    #    too low drives T_c below T_c_in by construction, and without the
-    #    event properties.check_range would raise mid-integration.
-    # 3. If the event fired before L: return T_lo_c - T_c_in (negative). It
-    #    has the correct sign, which is all brentq needs to keep its bracket.
-    # 4. Otherwise return T_c(L) - T_c_in.
-    # Check: r is increasing in sigma; r(sigma) is ~0 at the collocation
-    #    solution's T_c(0).
-    raise NotImplementedError
+    sol = _integrate_from_x0(
+        sigma, params, props, geom, dense_output=False, stop_if_cold_too_low=True
+    )
+    if sol.status == 1:
+        # The cold stream reached T_c_in at x_e < L, so sigma is too low. Return
+        # how far below T_c_in it would be at x = L if it kept cooling at the
+        # slope it has at x_e: negative (the right sign for brentq), and it goes
+        # to zero as x_e -> L, so the residual stays continuous at the root.
+        x_e = sol.t_events[0][0]
+        y_e = sol.y_events[0][0]
+        slope_c = steady_rhs(x_e, y_e, params, props, geom)[1]  # dT_c/dx < 0
+        return float(slope_c * (params["L"] - x_e))
+    return float(sol.y[1, -1] - params["T_c_in"])
 
 
 def solve_steady_shooting(params, props):
@@ -357,27 +486,51 @@ def solve_steady_shooting(params, props):
         Steady result dict (see module docstring), method "shooting",
         "sol" = the final dense solve_ivp result.
     """
-    # 1. geom = correlations.exchanger_geometry(params).
-    # 2. sigma* = brentq(shooting_residual, T_c_in + eps, T_h_in - eps,
-    #    args=(params, props, geom), xtol ~ 1e-10) with eps ~ 1e-6 K. The ends
-    #    of the bracket have opposite signs physically (a cold outlet at the
-    #    cold inlet temperature, or at the hot inlet temperature, are both
-    #    impossible).
-    # 3. Re-integrate from y(0) = [T_h_in, sigma*] with dense_output=True,
-    #    evaluate on x = np.linspace(0, L, n_out), and fill the same fields as
-    #    solve_steady (conductances, U', T_w).
-    # Check: test_collocation_matches_shooting: profiles agree with
-    #    solve_steady to ~1e-3 K for the variable-property base case.
-    raise NotImplementedError
+    # Define geometry and boundary conditions
+    geom = correlations.exchanger_geometry(params)
+    L = params["L"]
+    T_h_in = params["T_h_in"]
+    T_c_in = params["T_c_in"]
+
+    eps = 1.0e-6  # keep the bracket strictly inside (T_c_in, T_h_in) [K]
+    sigma_star = brentq(
+        shooting_residual,
+        T_c_in + eps,
+        T_h_in - eps,
+        args=(params, props, geom),
+        xtol=1.0e-10,
+    )
+
+    sol = _integrate_from_x0(
+        sigma_star, params, props, geom, dense_output=True, stop_if_cold_too_low=False
+    )
+    if sol.status != 0:
+        raise RuntimeError(f"Shooting re-integration failed at the root: {sol.message}")
+
+    x = np.linspace(0.0, L, params["n_out"])
+    T_h, T_c = sol.sol(x)
+    a_h, a_c = correlations.conductances(
+        T_h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
+    )
+    U_prime = correlations.overall_conductance(a_h, a_c)
+    T_w = wall_temperature(T_h, T_c, a_h, a_c)
+    return {
+        "x": x, "T_h": T_h, "T_c": T_c, "T_w": T_w,
+        "a_h": a_h, "a_c": a_c, "U_prime": U_prime,
+        "sol": sol, "method": "shooting",
+    }
 
 
 def energy_balance(steady, params, props):
     """Heat duty computed three independent ways (energy closure).
 
     Eq 16:
-      Q_h   = mdot_h [hhat_h(T_h(0)) - hhat_h(T_h(L))]
-      Q_c   = mdot_c [hhat_c(T_c(0)) - hhat_c(T_c(L))]
-      Q_int = integral from 0 to L of U'(T_h - T_c) dx
+      Q_h   = mdot_h [hhat_h(T_h(0)) - hhat_h(T_h(L))] = Heat lost by hot stream
+      Q_c   = mdot_c [hhat_c(T_c(0)) - hhat_c(T_c(L))] = Heat gained by cold stream
+      Q_int = integral from 0 to L of U'(T_h - T_c) dx = Heat transferred between the streams
+
+    By energy conservation, 
+      Q_h = Q_c = Q_int ideally
 
     Parameters
     ----------
@@ -394,18 +547,51 @@ def energy_balance(steady, params, props):
         "Q_h", "Q_c", "Q_int" [W]; "closure_hc" = |Q_h - Q_c|/Q_h and
         "closure_int" = |Q_h - Q_int|/Q_h [-].
     """
-    # 1. End values from the solution arrays: T_h(0) = T_h[0] (hot inlet),
-    #    T_h(L) = T_h[-1] (hot outlet), T_c(0) = T_c[0] (cold outlet),
-    #    T_c(L) = T_c[-1] (cold inlet).
-    # 2. Q_h and Q_c from properties.enthalpy on each side's own surrogate.
-    # 3. Q_int: if a collocation sol is available, integrate
-    #    q'(x) = U'(x) (T_h(x) - T_c(x)) with scipy.integrate.quad, evaluating
-    #    T from sol.sol(x) and U' from correlations.conductances, with
-    #    epsrel ~ 1e-10 and limit ~ 200. Otherwise use
-    #    scipy.integrate.simpson on the (n_out,) arrays.
-    # 4. Relative closures as in the Returns section.
-    # Pitfall: this check only works if d(hhat)/dT = cp in the surrogates
-    #    (enthalpy integrated from the cp fit). If hhat came straight from
-    #    CoolProp, the closure would be stuck at the fit error (~1e-3).
-    # Check: tests/test_steady.py::test_energy_closure (both closures < 1e-4).
-    raise NotImplementedError
+
+    T_h = steady["T_h"]
+    T_c = steady["T_c"]
+    mdot_h = params["mdot_h"]
+    mdot_c = params["mdot_c"]
+
+    # Hot stream loses enthalpy between its inlet (x = 0) and outlet (x = L);
+    # the cold stream gains it between its inlet (x = L) and outlet (x = 0).
+    Q_h = mdot_h * (
+        properties.enthalpy(props["h"], T_h[0]) - properties.enthalpy(props["h"], T_h[-1])
+    )
+    Q_c = mdot_c * (
+        properties.enthalpy(props["c"], T_c[0]) - properties.enthalpy(props["c"], T_c[-1])
+    )
+
+    # Calculate Q_int by integrated local heat transfer
+    # If method == collocation, we have a continuous numerical solution
+    if steady["method"] == "collocation":
+        geom = correlations.exchanger_geometry(params)
+        sol = steady["sol"]
+
+        # Local heat transfer per unit length
+        def q_prime(x):
+            T_h_x, T_c_x = sol.sol(x)
+            a_h, a_c = correlations.conductances(
+                T_h_x, T_c_x, mdot_h, mdot_c, params, props, geom
+            )
+            return correlations.overall_conductance(a_h, a_c) * (T_h_x - T_c_x)
+
+        Q_int, _ = quad(q_prime, 0.0, params["L"], epsrel=1.0e-10, limit=200)
+    # If method == shooting, we have a discrete mesh instead
+    else:
+        # Local heat transfer per unit length
+        q_line = steady["U_prime"] * (T_h - T_c)
+
+        Q_int = simpson(q_line, x=steady["x"])
+
+    Q_h = float(Q_h)
+    Q_c = float(Q_c)
+    Q_int = float(Q_int)
+
+    return {
+        "Q_h": Q_h,
+        "Q_c": Q_c,
+        "Q_int": Q_int,
+        "closure_hc": abs(Q_h - Q_c) / Q_h,
+        "closure_int": abs(Q_h - Q_int) / Q_h,
+    }
