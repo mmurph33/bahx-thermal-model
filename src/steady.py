@@ -520,19 +520,6 @@ def solve_steady_shooting(params, props):
         "sol": sol, "method": "shooting",
     }
 
-    # 1. geom = correlations.exchanger_geometry(params).
-    # 2. sigma* = brentq(shooting_residual, T_c_in + eps, T_h_in - eps,
-    #    args=(params, props, geom), xtol ~ 1e-10) with eps ~ 1e-6 K. The ends
-    #    of the bracket have opposite signs physically (a cold outlet at the
-    #    cold inlet temperature, or at the hot inlet temperature, are both
-    #    impossible).
-    # 3. Re-integrate from y(0) = [T_h_in, sigma*] with dense_output=True,
-    #    evaluate on x = np.linspace(0, L, n_out), and fill the same fields as
-    #    solve_steady (conductances, U', T_w).
-    # Check: test_collocation_matches_shooting: profiles agree with
-    #    solve_steady to ~1e-3 K for the variable-property base case.
-    raise NotImplementedError
-
 
 def energy_balance(steady, params, props):
     """Heat duty computed three independent ways (energy closure).
@@ -600,7 +587,7 @@ def energy_balance(steady, params, props):
     Q_h = float(Q_h)
     Q_c = float(Q_c)
     Q_int = float(Q_int)
-    
+
     return {
         "Q_h": Q_h,
         "Q_c": Q_c,
