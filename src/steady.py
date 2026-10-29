@@ -372,6 +372,62 @@ def solve_steady(params, props):
             "method": "collocation"
         }
 
+def _integrate_from_x0(sigma, params, props, geom, dense_output, stop_if_cold_too_low):
+    """Integrate Eq 6 from x = 0 with y(0) = [T_h_in, sigma] (shooting helper).
+
+    Shared by shooting_residual (no dense output) and solve_steady_shooting
+    (dense output for the final profiles). With stop_if_cold_too_low, a
+    terminal event stops the integration as soon as the cold stream falls to
+    T_c_in. The cold stream only cools along +x, so if that happens before
+    x = L the trial sigma is too low (T_c(L) < T_c_in), and the integration
+    must stop there: left running, T_c would fall out of the surrogate range
+    and properties.check_range would raise. The event sits at T_c_in, not at
+    the bottom of the surrogate range, because the integrator's trial steps
+    overshoot an event by up to a few K before the crossing is detected; the
+    fit margin below T_c_in absorbs that overshoot.
+
+    The final integration at the root sigma* turns the event off: there
+    T_c(L) = T_c_in to within the root tolerance, so the event can fire a
+    hair before x = L by round-off alone, and the profile is wanted all the
+    way to x = L.
+
+    Parameters
+    ----------
+    sigma : float
+        Trial cold outlet temperature T_c(0) [K].
+    params, props, geom : dict
+        As for steady_rhs.
+    dense_output : bool
+        Whether to return a continuous interpolant (sol.sol).
+    stop_if_cold_too_low : bool
+        Whether to stop at the event described above.
+
+    Returns
+    -------
+    sol : scipy OdeResult
+        sol.status == 1 means the event fired before x = L.
+    """
+
+    T_c_in = params["T_c_in"]
+
+    # Terminal event when T_c reaches bottom of cold surrogate model's range
+    def cold_reaches_inlet_temperature(x, y):
+        return y[1] - T_c_in
+
+    cold_reaches_inlet_temperature.terminal = True
+    cold_reaches_inlet_temperature.direction = -1
+
+    return solve_ivp(
+        lambda x, y: steady_rhs(x, y, params, props, geom),
+        (0.0, params["L"]),
+        [params["T_h_in"], sigma],
+        method="LSODA",
+        rtol=1.0e-10,
+        atol=1.0e-8,
+        events=cold_reaches_inlet_temperature if stop_if_cold_too_low else None,
+        dense_output=dense_output,
+    )
+
 
 def shooting_residual(sigma, params, props, geom):
     """Shooting residual for a trial cold-outlet temperature.
@@ -396,21 +452,19 @@ def shooting_residual(sigma, params, props, geom):
         Residual [K]. Negative means sigma is too low (T_c falls below T_c_in
         before x = L).
     """
-    # 1. Integrate with solve_ivp(fun=lambda x, y: steady_rhs(x, y, ...),
-    #    t_span=(0, L), y0=[T_h_in, sigma]), method "LSODA" or "Radau",
-    #    rtol ~ 1e-10, atol ~ 1e-8. Tight tolerances matter: the map
-    #    sigma -> T_c(L) is very sensitive at large NTU (1 - C_r).
-    # 2. Add a terminal event that fires when T_c reaches the bottom of the
-    #    cold surrogate's range (event(x, y) = y[1] - surr_c["T_lo"],
-    #    event.terminal = True, event.direction = -1). A trial sigma that is
-    #    too low drives T_c below T_c_in by construction, and without the
-    #    event properties.check_range would raise mid-integration.
-    # 3. If the event fired before L: return T_lo_c - T_c_in (negative). It
-    #    has the correct sign, which is all brentq needs to keep its bracket.
-    # 4. Otherwise return T_c(L) - T_c_in.
-    # Check: r is increasing in sigma; r(sigma) is ~0 at the collocation
-    #    solution's T_c(0).
-    raise NotImplementedError
+    sol = _integrate_from_x0(
+        sigma, params, props, geom, dense_output=False, stop_if_cold_too_low=True
+    )
+    if sol.status == 1:
+        # The cold stream reached T_c_in at x_e < L, so sigma is too low. Return
+        # how far below T_c_in it would be at x = L if it kept cooling at the
+        # slope it has at x_e: negative (the right sign for brentq), and it goes
+        # to zero as x_e -> L, so the residual stays continuous at the root.
+        x_e = sol.t_events[0][0]
+        y_e = sol.y_events[0][0]
+        slope_c = steady_rhs(x_e, y_e, params, props, geom)[1]  # dT_c/dx < 0
+        return float(slope_c * (params["L"] - x_e))
+    return float(sol.y[1, -1] - params["T_c_in"])
 
 
 def solve_steady_shooting(params, props):
@@ -432,6 +486,40 @@ def solve_steady_shooting(params, props):
         Steady result dict (see module docstring), method "shooting",
         "sol" = the final dense solve_ivp result.
     """
+    # Define geometry and boundary conditions
+    geom = correlations.exchanger_geometry(params)
+    L = params["L"]
+    T_h_in = params["T_h_in"]
+    T_c_in = params["T_c_in"]
+
+    eps = 1.0e-6  # keep the bracket strictly inside (T_c_in, T_h_in) [K]
+    sigma_star = brentq(
+        shooting_residual,
+        T_c_in + eps,
+        T_h_in - eps,
+        args=(params, props, geom),
+        xtol=1.0e-10,
+    )
+
+    sol = _integrate_from_x0(
+        sigma_star, params, props, geom, dense_output=True, stop_if_cold_too_low=False
+    )
+    if sol.status != 0:
+        raise RuntimeError(f"Shooting re-integration failed at the root: {sol.message}")
+
+    x = np.linspace(0.0, L, params["n_out"])
+    T_h, T_c = sol.sol(x)
+    a_h, a_c = correlations.conductances(
+        T_h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
+    )
+    U_prime = correlations.overall_conductance(a_h, a_c)
+    T_w = wall_temperature(T_h, T_c, a_h, a_c)
+    return {
+        "x": x, "T_h": T_h, "T_c": T_c, "T_w": T_w,
+        "a_h": a_h, "a_c": a_c, "U_prime": U_prime,
+        "sol": sol, "method": "shooting",
+    }
+
     # 1. geom = correlations.exchanger_geometry(params).
     # 2. sigma* = brentq(shooting_residual, T_c_in + eps, T_h_in - eps,
     #    args=(params, props, geom), xtol ~ 1e-10) with eps ~ 1e-6 K. The ends
@@ -469,18 +557,44 @@ def energy_balance(steady, params, props):
         "Q_h", "Q_c", "Q_int" [W]; "closure_hc" = |Q_h - Q_c|/Q_h and
         "closure_int" = |Q_h - Q_int|/Q_h [-].
     """
-    # 1. End values from the solution arrays: T_h(0) = T_h[0] (hot inlet),
-    #    T_h(L) = T_h[-1] (hot outlet), T_c(0) = T_c[0] (cold outlet),
-    #    T_c(L) = T_c[-1] (cold inlet).
-    # 2. Q_h and Q_c from properties.enthalpy on each side's own surrogate.
-    # 3. Q_int: if a collocation sol is available, integrate
-    #    q'(x) = U'(x) (T_h(x) - T_c(x)) with scipy.integrate.quad, evaluating
-    #    T from sol.sol(x) and U' from correlations.conductances, with
-    #    epsrel ~ 1e-10 and limit ~ 200. Otherwise use
-    #    scipy.integrate.simpson on the (n_out,) arrays.
-    # 4. Relative closures as in the Returns section.
-    # Pitfall: this check only works if d(hhat)/dT = cp in the surrogates
-    #    (enthalpy integrated from the cp fit). If hhat came straight from
-    #    CoolProp, the closure would be stuck at the fit error (~1e-3).
-    # Check: tests/test_steady.py::test_energy_closure (both closures < 1e-4).
-    raise NotImplementedError
+
+    T_h = steady["T_h"]
+    T_c = steady["T_c"]
+    mdot_h = params["mdot_h"]
+    mdot_c = params["mdot_c"]
+
+    # Hot stream loses enthalpy between its inlet (x = 0) and outlet (x = L);
+    # the cold stream gains it between its inlet (x = L) and outlet (x = 0).
+    Q_h = mdot_h * (
+        properties.enthalpy(props["h"], T_h[0]) - properties.enthalpy(props["h"], T_h[-1])
+    )
+    Q_c = mdot_c * (
+        properties.enthalpy(props["c"], T_c[0]) - properties.enthalpy(props["c"], T_c[-1])
+    )
+
+    if steady["method"] == "collocation":
+        geom = correlations.exchanger_geometry(params)
+        sol = steady["sol"]
+
+        def q_prime(x):
+            T_h_x, T_c_x = sol.sol(x)
+            a_h, a_c = correlations.conductances(
+                T_h_x, T_c_x, mdot_h, mdot_c, params, props, geom
+            )
+            return correlations.overall_conductance(a_h, a_c) * (T_h_x - T_c_x)
+
+        Q_int, _ = quad(q_prime, 0.0, params["L"], epsrel=1.0e-10, limit=200)
+    else:
+        q_line = steady["U_prime"] * (T_h - T_c)
+        Q_int = simpson(q_line, x=steady["x"])
+
+    Q_h = float(Q_h)
+    Q_c = float(Q_c)
+    Q_int = float(Q_int)
+    return {
+        "Q_h": Q_h,
+        "Q_c": Q_c,
+        "Q_int": Q_int,
+        "closure_hc": abs(Q_h - Q_c) / Q_h,
+        "closure_int": abs(Q_h - Q_int) / Q_h,
+    }
