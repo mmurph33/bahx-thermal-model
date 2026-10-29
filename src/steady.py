@@ -538,9 +538,12 @@ def energy_balance(steady, params, props):
     """Heat duty computed three independent ways (energy closure).
 
     Eq 16:
-      Q_h   = mdot_h [hhat_h(T_h(0)) - hhat_h(T_h(L))]
-      Q_c   = mdot_c [hhat_c(T_c(0)) - hhat_c(T_c(L))]
-      Q_int = integral from 0 to L of U'(T_h - T_c) dx
+      Q_h   = mdot_h [hhat_h(T_h(0)) - hhat_h(T_h(L))] = Heat lost by hot stream
+      Q_c   = mdot_c [hhat_c(T_c(0)) - hhat_c(T_c(L))] = Heat gained by cold stream
+      Q_int = integral from 0 to L of U'(T_h - T_c) dx = Heat transferred between the streams
+
+    By energy conservation, 
+      Q_h = Q_c = Q_int ideally
 
     Parameters
     ----------
@@ -572,10 +575,13 @@ def energy_balance(steady, params, props):
         properties.enthalpy(props["c"], T_c[0]) - properties.enthalpy(props["c"], T_c[-1])
     )
 
+    # Calculate Q_int by integrated local heat transfer
+    # If method == collocation, we have a continuous numerical solution
     if steady["method"] == "collocation":
         geom = correlations.exchanger_geometry(params)
         sol = steady["sol"]
 
+        # Local heat transfer per unit length
         def q_prime(x):
             T_h_x, T_c_x = sol.sol(x)
             a_h, a_c = correlations.conductances(
@@ -584,13 +590,17 @@ def energy_balance(steady, params, props):
             return correlations.overall_conductance(a_h, a_c) * (T_h_x - T_c_x)
 
         Q_int, _ = quad(q_prime, 0.0, params["L"], epsrel=1.0e-10, limit=200)
+    # If method == shooting, we have a discrete mesh instead
     else:
+        # Local heat transfer per unit length
         q_line = steady["U_prime"] * (T_h - T_c)
+
         Q_int = simpson(q_line, x=steady["x"])
 
     Q_h = float(Q_h)
     Q_c = float(Q_c)
     Q_int = float(Q_int)
+    
     return {
         "Q_h": Q_h,
         "Q_c": Q_c,
