@@ -205,11 +205,8 @@ def steady_bc(ya, yb, T_h_in, T_c_in):
     residual : ndarray, shape (2,)
         [T_h(0) - T_h_in, T_c(L) - T_c_in] [K].
     """
-    # 1. Return np.array([ya[0] - T_h_in, yb[1] - T_c_in]).
-    # Pitfall: the hot condition uses ya (x = 0) and the cold condition uses
-    #    yb (x = L). Swapping them gives a parallel-flow exchanger.
-    # Check: the analytical profiles give a zero residual.
-    raise NotImplementedError
+
+    return np.array([ya[0] - T_h_in, yb[1] - T_c_in])
 
 
 def initial_guess(x, params, props, geom):
@@ -235,16 +232,27 @@ def initial_guess(x, params, props, geom):
     y_guess : ndarray, shape (2, m)
         [T_h, T_c] at the mesh points [K].
     """
-    # 1. props0 = {side: properties.continuation_surrogate(props[side], 0.0)}:
-    #    every property is now its mean value, so a_h, a_c are constants.
-    # 2. a_h, a_c from correlations.conductances at any in-range temperatures
-    #    (e.g. the surrogates' T_bar), then U' = overall_conductance(a_h, a_c).
-    # 3. C_h = mdot_h * mean cp_h, C_c = mdot_c * mean cp_c.
-    # 4. T_h, T_c = analytical_profiles(x, L, T_h_in, T_c_in, C_h, C_c, U').
-    # 5. Return np.vstack((T_h, T_c)).
-    # Check: steady_bc(y_guess[:, 0], y_guess[:, -1], ...) is zero; both rows
-    #    decrease with x.
-    raise NotImplementedError
+
+    props0 = {}
+    for side in ("h", "c"):
+        props0["side"] = properties.continuation_surrogate(props["side"], 0,0)
+
+    T_bar_h = props0["h"]["T_bar"]
+    T_bar_c = props0["c"]["T_bar"]
+
+    a_h, a_c = correlations.conductances(
+        T_bar,h, T_bar_c, params["mdot_h"], params["mdot_c"], params, props, geom
+    )
+
+    U_prime = correlations.overall_conductances(a_h, a_c)
+    C_h = params["mdot_h"] * properties.evaulate(props0["h"], "cp", T_bar_h)
+    C_c = params["mdot_c"] * properties.evaulate(props0["c"], "cp", T_bar_c)
+
+    T_h, T_c = analytical_profiles(
+        x, params["L"], params["T_h_in"], params["T_c_in"], C_h, C_c, U_prime
+    )
+
+    return np.vstack((T_h, T_c))
 
 
 def solve_steady(params, props):
@@ -273,30 +281,96 @@ def solve_steady(params, props):
         If the solve fails even with continuation. Report sol.message; do not
         retry with a looser tolerance (CLAUDE.md).
     """
-    # 1. geom = correlations.exchanger_geometry(params) (build it here so a
-    #    perturbed params never meets a stale geometry).
-    # 2. Initial mesh x0 = np.linspace(0, L, ~50); y0 = initial_guess(x0, ...).
-    # 3. Wrap the RHS and BCs for scipy:
-    #      fun(x, y) = steady_rhs(x, y, params, props, geom)
-    #      bc(ya, yb) = steady_bc(ya, yb, T_h_in, T_c_in)
-    # 4. sol = solve_bvp(fun, bc, x0, y0, tol=bvp_tol, max_nodes=bvp_max_nodes).
-    #    tol is a relative tolerance on the collocation residual, not on T
-    #    itself, which is why tests tighten it to 1e-8.
-    # 5. If sol.status != 0: continuation. For lam in continuation_lams:
-    #    props_lam = {side: properties.continuation_surrogate(props[side], lam)},
-    #    solve from the previous solution (x = sol.x, y = sol.y). Stop with
-    #    RuntimeError if any step fails.
-    # 6. Post-process on x = np.linspace(0, L, n_out): T_h, T_c = sol.sol(x)
-    #    (the dense, C1-continuous collocation interpolant); a_h, a_c from
-    #    correlations.conductances; U' = overall_conductance(a_h, a_c);
-    #    T_w = wall_temperature(T_h, T_c, a_h, a_c).
-    # 7. Return the dict with sol and method = "collocation".
-    # Pitfall: if properties.check_range raises during the solve, the iterate
-    #    left the fitted range. Widen fit_T_margin or improve the guess;
-    #    never remove the check.
-    # Check: tests/test_steady.py (constant properties vs epsilon-NTU, energy
-    #    closure, collocation vs shooting).
-    raise NotImplementedError
+
+    # Get geometry and boundary conditions
+    geom = correlations.exhcanger_geometry(params)
+    L = params["L"]
+    T_h_in = params["T_h_in"]
+    T_c_in = params["T_c_in"]
+
+    # Check continuation_lamdha is valid
+    if len(params["continuation_lams"]) == 0 or params["continuation_lams"][-1] != 1.0:
+        raise ValueError("continuation_lams must be non-empty and end at 1.0")
+
+    # Solve the bvp for given properties and mesh
+    def collocate(props_lam, x_mesh, y_mesh):
+        # Define rhs and lhs of the equation
+        def rhs(x,y):
+            return steady_rhs(x,y,params,props_lam, geom)
+
+        def bc(ya,yb):
+            return steady_bc(ya, yb, T_h_in, T_c_in)
+
+        # Find solution to bvp
+        sol = solve_bvp(
+            rhs, 
+            bc,
+            x_mesh,
+            y_mesh,
+            tol = params["bvp_tol"], # tolerance
+            max_nodes = params["bvp_max_nodes"]
+        )
+
+        return sol
+
+    x0 = np.linspace(0.0, L)
+    y0 = initial_guess(x0, params, props, geom)
+
+    # First, try full, temperature-dependent properties
+    try:
+        solution = collocate(props, x0, y0)
+        converged = solution.status == 0
+    except ValueError:
+        converged = False # solution failed to converge 
+
+    # If the solution failed to converged, switch to continuation model
+    if not converged:
+        x_mesh = x0
+        y_mesh = y0
+
+        for lam in params["continuation_lams"]:
+            # Build property set for current parameters
+            props_lam = {
+                side: properties.continuation_surrogate(props[side], lam)
+            }
+
+            # Solve using current properties and previous mesh & solution
+            try:
+                solution = collocate(props_lam, x_mesh, y_mesh)
+            except ValueError as err:
+                raise RuntimeError(
+                    f"Steady State BVP: property range error at "
+                    f"lambda = {lam}: {err}"
+                ) from err
+
+            if solution.status != 0:
+                raise RuntimeError(
+                    f"Steady State BVP did not converge at "
+                    f"lambda = {lam}: {solution.message}"
+                )
+
+            # Update mesh
+            x_mesh = solution.x
+            y_mesh = solution.y
+
+        x = np.linspace(0.0, L, params["n_out"])
+        T_h, T_c = sol.sol(x)
+        a_h, a_c = correlations.conductances(
+            T_h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
+        )
+        U_prime = correlations.overall_conductance(a_h, a_c)
+        T_w = wall_temperature(T_h, T_c, a_h, a_c)
+        return {
+            "x": x,
+            "T_h": T_h,
+            "T_c": T_c,
+            "T_w": T_w,
+            "a_h": a_h,
+            "a_c": a_c,
+            "U_prime": U_prime,
+            "sol": sol,
+            "method": "collocation"
+        }
 
 
 def shooting_residual(sigma, params, props, geom):
