@@ -579,8 +579,9 @@ def build_surrogates(params, scenario="none"):
     if scenario == "feed_ramp":
         ramp_dT = params["ramp_dT"]
         if params["ramp_dT"] < 0:
+            # Cooldown: the hot inlet falls to T_h_in + ramp_dT, which can be
+            # below T_c_in. T_max stays T_h_in, the hot inlet at t = 0.
             T_min = min(T_min, T_max + ramp_dT)
-            T_max = max(T_min, T_max + ramp_dT)
         else:
             T_max = T_max + ramp_dT
 
@@ -847,7 +848,9 @@ def evaluate(surr, name, T):
     if kind == "poly":
         phi = np.polynomial.polynomial.polyval(T_scaled, coef)
     elif kind == "spline":
-        phi = coef(T_scaled)
+        # The splines are fitted against T in kelvin (T_fit), not T~, so
+        # evaluate them at T.
+        phi = coef(T)
     else:
         raise ValueError(f"Unknown surrogate kind: {kind!r}")
 
@@ -891,13 +894,13 @@ def enthalpy(surr, T):
     # Determine hhat depending on the kind of surrogate model
     kind = surr["kind"]
     if kind == "poly":
-        hhat_ref, cp_integral, T_bar, dT = surr["coeff"]["hhat"]
+        hhat_ref, cp_integral, T_bar, dT = surr["coef"]["hhat"]
         T_scaled = (T - T_bar) / dT
         hhat = hhat_ref + dT * np.polynomial.polynomial.polyval(T_scaled, cp_integral)
 
     elif kind == "spline":
         cp_integral, hhat_offset = surr["coef"]["hhat"]
-        hhat = cp_integral(T) + hhat_offsets
+        hhat = cp_integral(T) + hhat_offset
     else:
         raise ValueError(f"Unsupported type {kind}")
 

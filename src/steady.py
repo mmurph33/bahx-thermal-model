@@ -31,7 +31,7 @@ import numpy as np
 from scipy.integrate import quad, simpson, solve_bvp, solve_ivp
 from scipy.optimize import brentq
 
-import correlations, properties
+from src import correlations, properties
 
 
 def wall_temperature(T_h, T_c, a_h, a_c):
@@ -82,7 +82,7 @@ def effectiveness(NTU, C_r):
 
     one_minus_E = -np.expm1(-k) # np.expm1 = 1 - np.exp(-k)
     E = np.exp(-k)
-    eps = ome_minus_E / (one_minus_E + (1 - C_r) * E)
+    eps = one_minus_E / (one_minus_E + (1 - C_r) * E)
     return eps
 
 
@@ -171,18 +171,20 @@ def steady_rhs(x, y, params, props, geom):
     T_c = y[1]
 
     a_h, a_c = correlations.conductances(
-        T_,h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
+        T_h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
     )
 
     U_prime = correlations.overall_conductance(a_h, a_c)
     q_prime = U_prime * (T_h - T_c) # local heat flow per unit length
 
     cp_h = properties.evaluate(props["h"], "cp", T_h)
-    cp_c = properties.evaulate(props["c"], "cp", T_c)
+    cp_c = properties.evaluate(props["c"], "cp", T_c)
 
     dT_h_dx = -q_prime / (params["mdot_h"] * cp_h)
     dT_c_dx = -q_prime / (params["mdot_c"] * cp_c)
-    return np.vstack((dT_h_dx, dT_c_dx))
+    # np.array (not np.vstack) keeps the input shape: (2, m) from solve_bvp,
+    # (2,) from solve_ivp (vstack would turn (2,) into (2, 1))
+    return np.array([dT_h_dx, dT_c_dx])
 
 
 def steady_bc(ya, yb, T_h_in, T_c_in):
@@ -233,20 +235,23 @@ def initial_guess(x, params, props, geom):
         [T_h, T_c] at the mesh points [K].
     """
 
+    # lambda = 0 copies: cp, mu and k are the mean values phi_bar (Eq 23)
     props0 = {}
     for side in ("h", "c"):
-        props0["side"] = properties.continuation_surrogate(props["side"], 0,0)
+        props0[side] = properties.continuation_surrogate(props[side], 0.0)
 
     T_bar_h = props0["h"]["T_bar"]
     T_bar_c = props0["c"]["T_bar"]
 
+    # Conductances and capacity rates from the mean properties, so U', C_h and
+    # C_c are constants and the analytical profile applies
     a_h, a_c = correlations.conductances(
-        T_bar,h, T_bar_c, params["mdot_h"], params["mdot_c"], params, props, geom
+        T_bar_h, T_bar_c, params["mdot_h"], params["mdot_c"], params, props0, geom
     )
 
-    U_prime = correlations.overall_conductances(a_h, a_c)
-    C_h = params["mdot_h"] * properties.evaulate(props0["h"], "cp", T_bar_h)
-    C_c = params["mdot_c"] * properties.evaulate(props0["c"], "cp", T_bar_c)
+    U_prime = correlations.overall_conductance(a_h, a_c)
+    C_h = params["mdot_h"] * properties.evaluate(props0["h"], "cp", T_bar_h)
+    C_c = params["mdot_c"] * properties.evaluate(props0["c"], "cp", T_bar_c)
 
     T_h, T_c = analytical_profiles(
         x, params["L"], params["T_h_in"], params["T_c_in"], C_h, C_c, U_prime
@@ -283,7 +288,7 @@ def solve_steady(params, props):
     """
 
     # Get geometry and boundary conditions
-    geom = correlations.exhcanger_geometry(params)
+    geom = correlations.exchanger_geometry(params)
     L = params["L"]
     T_h_in = params["T_h_in"]
     T_c_in = params["T_c_in"]
@@ -332,6 +337,7 @@ def solve_steady(params, props):
             # Build property set for current parameters
             props_lam = {
                 side: properties.continuation_surrogate(props[side], lam)
+                for side in ("h", "c")
             }
 
             # Solve using current properties and previous mesh & solution
@@ -353,24 +359,25 @@ def solve_steady(params, props):
             x_mesh = solution.x
             y_mesh = solution.y
 
-        x = np.linspace(0.0, L, params["n_out"])
-        T_h, T_c = sol.sol(x)
-        a_h, a_c = correlations.conductances(
-            T_h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
-        )
-        U_prime = correlations.overall_conductance(a_h, a_c)
-        T_w = wall_temperature(T_h, T_c, a_h, a_c)
-        return {
-            "x": x,
-            "T_h": T_h,
-            "T_c": T_c,
-            "T_w": T_w,
-            "a_h": a_h,
-            "a_c": a_c,
-            "U_prime": U_prime,
-            "sol": sol,
-            "method": "collocation"
-        }
+    # Report the converged solution (direct or continuation) on an even grid
+    x = np.linspace(0.0, L, params["n_out"])
+    T_h, T_c = solution.sol(x)
+    a_h, a_c = correlations.conductances(
+        T_h, T_c, params["mdot_h"], params["mdot_c"], params, props, geom
+    )
+    U_prime = correlations.overall_conductance(a_h, a_c)
+    T_w = wall_temperature(T_h, T_c, a_h, a_c)
+    return {
+        "x": x,
+        "T_h": T_h,
+        "T_c": T_c,
+        "T_w": T_w,
+        "a_h": a_h,
+        "a_c": a_c,
+        "U_prime": U_prime,
+        "sol": solution,
+        "method": "collocation"
+    }
 
 def _integrate_from_x0(sigma, params, props, geom, dense_output, stop_if_cold_too_low):
     """Integrate Eq 6 from x = 0 with y(0) = [T_h_in, sigma] (shooting helper).

@@ -32,7 +32,7 @@ The side_geom dict (one per side; geom = {"h": ..., "c": ..., "A_m": ..., "C_m":
 
 import numpy as np
 
-import properties
+from src import properties
 
 
 def osf_geometry(s, b, t, l, W):
@@ -199,7 +199,7 @@ def colburn_j(Re, alpha_mb, delta_mb, gamma_mb):
     )
 
     # Turbulent
-    turblent_part = (
+    turbulent_part = (
         1.0
         + 5.269e-5
         * Re ** 1.340
@@ -221,7 +221,8 @@ def laminar_nusselt_rect(alpha_mb):
     Parameters
     ----------
     alpha_mb : float
-        Channel aspect ratio s/b, between 0 and 1 [-].
+        Channel aspect ratio s/b [-]. Values above 1 are inverted (b/s),
+        since the fit is for short side / long side.
 
     Returns
     -------
@@ -230,8 +231,12 @@ def laminar_nusselt_rect(alpha_mb):
     """
 
     # Nu_H1 = 8.235 (1 - 2.0421 a + 3.0853 a^2 - 2.4765 a^3 + 1.0578 a^4 - 0.1861 a^5)
+    # The fit is for a = short side / long side <= 1. A duct with s > b is the
+    # same duct turned on its side, so use min(s/b, b/s); a > 1 would give a
+    # negative Nu (e.g. -297 at a = 4).
+    a = np.minimum(alpha_mb, 1.0 / alpha_mb)
     coeffs_H1 = [8.235 * c for c in (1.0, -2.0421, 3.0853, -2.4765, 1.0578, -0.1861)]
-    return np.polynomial.polynomial.polyval(alpha_mb, coeffs_H1)
+    return np.polynomial.polynomial.polyval(a, coeffs_H1)
 
 
 def heat_transfer_coefficient(mdot, cp, mu, k, side_geom):
@@ -269,7 +274,11 @@ def heat_transfer_coefficient(mdot, cp, mu, k, side_geom):
     #    value, never the initial one.
     # Check: base case h ~ 350-500 W/(m^2 K) on both sides. With mdot -> 0
     #    the result tends to h_lam (no division by zero, no negative h).
-    
+
+    # Mass flux and Reynolds number of this stream (Section 4.2)
+    G = mdot / side_geom["A_ff"]
+    Re = reynolds(mdot, mu, side_geom)
+
     # Ensure no division by 0
     Re_safe = np.maximum(Re, 1.0e-12)
 
