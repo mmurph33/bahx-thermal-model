@@ -52,7 +52,7 @@ from scipy import sparse
 from scipy.integrate import solve_ivp
 from scipy.optimize import root
 
-from src import correlations, properties, steady
+import correlations, properties, steady
 
 
 def time_scales(params, props):
@@ -79,17 +79,89 @@ def time_scales(params, props):
         "kappa" [-], "stiffness" [-], "t_response" = (1 + kappa) * max tau_res [s]
         (order of the whole-exchanger response time, Section 6.2).
     """
-    # 1. geom = correlations.exchanger_geometry(params).
-    # 2. Representative properties: the surrogates' mean values (rho, cp) and
-    #    conductances a_h, a_c at mean properties (as in steady.initial_guess).
-    # 3. Evaluate each formula above for each side.
-    # 4. Print or report kappa: the math doc asks for the base-case value in
-    #    week 1. If kappa >> 1, the quasi-steady fallback (Section 6.4) is
-    #    attractive.
-    # Check: a hand calculation for the base case gives kappa of order 5-10
-    #    and tau_res of order seconds; the cold gas time tau_g_c is the
-    #    fastest scale, which is why the system is stiff.
-    raise NotImplementedError
+
+    # 1. Calculate exhcanger geometry
+    geom = correlations.exchanger_geometry(params)
+
+    # 2. Find representative properties (surrogate mean values and properties)
+    props0 = {
+        side: properties.continuation_surrogate(props[side], 0.0)
+        for side in ("h", "c")
+    }
+
+    # Representative temperatures are the midpoint temperatures
+    # associated with each side's property surrogate.
+    T_bar_h = props0["h"]["T_bar"]
+    T_bar_c = props0["c"]["T_bar"]
+
+    # Evaluate representative gas density and heat capacity.
+    # These are used to calculate the thermal energy stored within each gas passage.
+    rho_h = properties.evaluate(props0["h"], "rho", T_bar_h)
+    rho_c = properties.evaluate(props0["c"], "rho", T_bar_c)
+
+    cp_h = properties.evaluate(props0["h"], "cp", T_bar_h)
+    cp_c = properties.evaluate(props0["c"], "cp", T_bar_c)
+
+    # 3. Calculate hot and cold side conductance
+    a_h, a_c = correlations.conductances(
+        T_bar_h,
+        T_bar_c,
+        params["mdot_h"],
+        params["mdot_c"],
+        params,
+        props0,
+        geom,
+    )
+
+    # 4. Calculate gas residence times
+    # tau_res = (gas density * free flow area * length) / mass flow
+    tau_res_h = (
+        rho_h * geom["h"]["A_ff"] * params["L"] / params["mdot_h"]
+    )
+
+    tau_res_c = (
+        rho_c * geom["h"]["A_ff"] * params["L"] / params["mdot_c"]
+    )
+
+    # 5. Calculate gas to metal equilibriation time
+    # tau_g = (gas thermal capacity per unit length) / conductance
+    tau_g_h = (
+        rho_h * geom["h"]["A_ff"] * cp_h / a_h
+    )
+
+    tau_g_c = (
+        rho_c * geom["c"]["A_ff"] * cp_c / a_c
+    )
+
+    # 6. Calculate metal relaxation time
+    C_m = geom["C_m"]
+    tau_m = C_m / (a_h + a_c)
+
+    # 7. Calculate metal to gas thermal capacity ratio
+    # C'_gas = rho * A_ff * cp
+    gas_capacity_h = rho_h * geom["h"]["A_ff"] * cp_h
+    gas_capacity_c = rho_c * geom["c"]["A_ff"] * cp_c
+
+    kappa = C_m / (gas_capacity_h + gas_capacity_c)
+
+    # 8. Estimate system stiffness
+    # S approximatly N * (1 + kappa)
+    stiffness = params["N"] * (1.0 + kappa)
+
+    # 9. Estimate whole exchanger response time
+    t_response = (1.0 + kappa) * max(tau_res_h, tau_res_c)
+
+    # 10. Return all characteristic time scales
+    return {
+        "tau_res_h": float(tau_res_h),
+        "tau_res_c": float(tau_res_c),
+        "tau_g_h": float(tau_g_h),
+        "tau_g_c": float(tau_g_c),
+        "tau_m": float(tau_m),
+        "kappa": float(kappa),
+        "stiffness": float(stiffness),
+        "t_response": float(t_response),
+    }
 
 
 def cell_centers(L, N):

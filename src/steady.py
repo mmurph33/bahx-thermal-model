@@ -31,7 +31,7 @@ import numpy as np
 from scipy.integrate import quad, simpson, solve_bvp, solve_ivp
 from scipy.optimize import brentq
 
-from src import correlations, properties
+import correlations, properties
 
 
 def wall_temperature(T_h, T_c, a_h, a_c):
