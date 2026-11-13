@@ -67,7 +67,7 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-On a fresh clone, the setup and steady-state tests should pass; the transient tests are reported as skipped until `transient.py` is implemented.
+On a fresh clone, the setup, steady-state and transient tests should pass; only the transient grid-convergence test is skipped until `metrics.py` is implemented.
 
 ### Scripts
 
