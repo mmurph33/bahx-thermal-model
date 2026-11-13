@@ -31,7 +31,10 @@ import numpy as np
 from scipy.integrate import quad, simpson, solve_bvp, solve_ivp
 from scipy.optimize import brentq
 
-import correlations, properties
+# Import through the src package (run code from the repo root: pytest, or
+# python -m scripts.<name>). A bare `import correlations` only works when the
+# current directory is src/, and breaks every caller that imports src.steady.
+from src import correlations, properties
 
 
 def wall_temperature(T_h, T_c, a_h, a_c):

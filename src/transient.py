@@ -52,7 +52,10 @@ from scipy import sparse
 from scipy.integrate import solve_ivp
 from scipy.optimize import root
 
-import correlations, properties, steady
+# Import through the src package (run code from the repo root: pytest, or
+# python -m scripts.<name>). A bare `import correlations` only works when the
+# current directory is src/, and breaks every caller that imports src.transient.
+from src import correlations, properties, steady
 
 
 def time_scales(params, props):
@@ -79,8 +82,16 @@ def time_scales(params, props):
         "kappa" [-], "stiffness" [-], "t_response" = (1 + kappa) * max tau_res [s]
         (order of the whole-exchanger response time, Section 6.2).
     """
+    # Pseudocode: steps 1-10 below. Representative properties are the lambda = 0
+    #    surrogates (mean cp, mu, k) evaluated at T_bar (rho at T_bar), with the
+    #    conductances at those properties, as in steady.initial_guess.
+    # Report kappa: the math doc asks for the base-case value in week 1. If
+    #    kappa >> 1, the quasi-steady fallback (Section 6.4) is attractive.
+    # Check: a hand calculation for the base case gives kappa of order 5-10
+    #    and tau_res of order seconds; the cold gas time tau_g_c is the
+    #    fastest scale, which is why the system is stiff.
 
-    # 1. Calculate exhcanger geometry
+    # 1. Calculate exchanger geometry
     geom = correlations.exchanger_geometry(params)
 
     # 2. Find representative properties (surrogate mean values and properties)
@@ -120,7 +131,7 @@ def time_scales(params, props):
     )
 
     tau_res_c = (
-        rho_c * geom["h"]["A_ff"] * params["L"] / params["mdot_c"]
+        rho_c * geom["c"]["A_ff"] * params["L"] / params["mdot_c"]
     )
 
     # 5. Calculate gas to metal equilibriation time
@@ -183,12 +194,14 @@ def cell_centers(L, N):
     dx : float
         Cell width [m].
     """
+    # 1. dx = L/N; x = (np.arange(N) + 0.5) * dx.
+    # Check: x[0] = dx/2, x[-1] = L - dx/2, len(x) = N.
 
     # Total exchanger length is divided evenly into N cells
     dx = L / N
 
     # Center position of each cell is in the middle
-    x = (np.arrange(N) + 0.5) * dx
+    x = (np.arange(N) + 0.5) * dx
 
     return x, dx
 
@@ -208,6 +221,9 @@ def pack_state(T_h, T_c, T_w):
     y : ndarray, shape (3N,)
         State vector [K].
     """
+    # 1. y = np.empty(3N); y[0::3] = T_h; y[1::3] = T_c; y[2::3] = T_w
+    #    (or np.column_stack((T_h, T_c, T_w)).ravel()).
+    # Check: unpack_state(pack_state(a, b, c)) returns (a, b, c) exactly.
 
     # Number of finite volume cells
     N = len(T_h)
@@ -233,6 +249,9 @@ def unpack_state(y):
     T_h, T_c, T_w : ndarray, each shape (N,) or (N, n_t)
         Hot, cold and wall temperatures [K]. Views into y (do not modify).
     """
+    # 1. Return y[0::3], y[1::3], y[2::3]. Slicing along axis 0 works for both
+    #    input shapes; for histories, transpose to (n_t, N) afterwards.
+    # Check: same as pack_state.
 
     # Opposite of pack_state()
     T_h = y[0::3]
@@ -262,6 +281,22 @@ def jacobian_sparsity(N, axial_conduction):
     pattern : scipy.sparse matrix, shape (3N, 3N)
         1 where an entry may be nonzero, 0 elsewhere.
     """
+    # 1. Start from sparse.lil_matrix((3N, 3N)) (cheap to fill entry by entry).
+    # 2. For each cell i (Python index 0..N-1), with rows h = 3i, c = 3i+1,
+    #    w = 3i+2:
+    #      hot row h:   own T_h (3i), own T_w (3i+2), upstream T_h (3(i-1)) if i > 0
+    #      cold row c:  own T_c (3i+1), own T_w (3i+2), upstream T_c (3(i+1)+1) if i < N-1
+    #      wall row w:  own T_h, T_c, T_w; plus T_w of cells i-1 and i+1 if
+    #                   axial_conduction
+    #    a_h depends only on the local T_h and a_c only on the local T_c, so no
+    #    other entries appear.
+    # 3. Return pattern.tocsr().
+    # Pitfall: the band is +-3 even without conduction (the upstream gas
+    #    neighbours are 3 positions away). jac_sparsity is ignored if you also
+    #    pass jac=.
+    # Check: compute a dense finite-difference Jacobian of transient_rhs at a
+    #    random in-range state for N = 5; every nonzero must sit inside the
+    #    pattern.
 
     # Initialize empty sparse matrix (each row = ODE, each column = state variable)
     pattern = sparse.lil_matrix((3 * N, 3 * N), dtype=int)
@@ -281,12 +316,13 @@ def jacobian_sparsity(N, axial_conduction):
             h_upstream = 3 * (i-1)
             pattern[h, h_upstream] = 1 # Previous cell's hot gas temperature
 
-        # Cold gas energy equation (flow in -x direction)
+        # Cold gas energy equation (flow in -x direction, so the upstream
+        # cell is i+1, not i-1)
         pattern[c,c] = 1
         pattern[c,w] = 1
 
         if i < N - 1:
-            c_upstream = 3 * (i-1) + 1
+            c_upstream = 3 * (i+1) + 1
             pattern[c,c_upstream] = 1 # next cell's cold gas temperature
 
         # Metal wall energy equation
@@ -349,7 +385,15 @@ def smooth_ramp(s, sharpness):
     psi : ndarray, same shape as s
         Ramp fraction, between 0 and 1 [-].
     """
-    # Purpose: Smoothing out inlet tempeature ramp
+    # 1. softplus(z) = np.logaddexp(0, z) (overflow-safe for large z).
+    # 2. psi = (softplus(omega s) - softplus(omega (s - 1))) / omega.
+    # Pitfall: psi(0) = ln(2)/omega, not 0, and psi is already slightly
+    #    positive before s = 0. Start the ramp several corner widths after
+    #    t = 0 (ramp_t_start >~ 5 ramp_t/omega) so the initial state is steady.
+    # Check: psi(-10) ~ 0, psi(10) ~ 1, psi(0.5) = 0.5, the maximum slope is
+    #    tanh(omega/4), and psi is monotone.
+
+    # Purpose: Smoothing out inlet temperature ramp
 
     # Convert to numpy array
     s = np.asarray(s, dtype = float)
@@ -393,6 +437,22 @@ def boundary_conditions(t, params, scenario):
     ValueError
         For an unknown scenario name.
     """
+    # 1. Start from the constant base values (broadcast to the shape of t,
+    #    e.g. with np.full_like(t, value, dtype=float), if t is an array).
+    # 2. "feed_ramp": add ramp_dT * smooth_ramp((t - ramp_t_start)/ramp_t,
+    #    ramp_sharpness) to T_h_in.
+    # 3. "cold_trip": mdot_c(t) as above for t >= trip_t_start, unchanged
+    #    before. Use np.where so array t works.
+    # 4. Unknown scenario: raise ValueError (catches typos like "ramp").
+    # Pitfall: Eq 38 has a slope jump at trip_t_start (the math doc does not
+    #    smooth it, flagged). simulate() splits the integration there so BDF
+    #    never steps across the kink.
+    # Pitfall: the nominal ramp rate is r = ramp_dT/ramp_t. ALPEMA limits are
+    #    measured at the inlet nozzles too, so r itself must satisfy them
+    #    (metrics.check_alpema).
+    # Check: at t = 0 every scenario returns the base values (to ~1e-4 K for
+    #    the ramp); long after the ramp T_h_in -> T_h_in + ramp_dT; long after
+    #    the trip mdot_c -> phi * mdot_c.
 
     # Initialize all boundary conditions to base values
     # full_like creates arrays with the same shape as t.
@@ -424,7 +484,7 @@ def boundary_conditions(t, params, scenario):
             params["mdot_c"] * (
                 params["trip_phi"]
                 + (1.0 - params["trip_phi"])
-                * np.exp(-elapsed / params["trip_tau"])
+                * np.exp(-elapsed / params["trip_tau_v"])
             ),
             mdot_c
         )

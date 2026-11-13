@@ -32,7 +32,10 @@ The side_geom dict (one per side; geom = {"h": ..., "c": ..., "A_m": ..., "C_m":
 
 import numpy as np
 
-import properties
+# Import through the src package (run code from the repo root: pytest, or
+# python -m scripts.<name>). A bare `import properties` only works when the
+# current directory is src/, and breaks every caller that imports src.correlations.
+from src import properties
 
 
 def osf_geometry(s, b, t, l, W):
