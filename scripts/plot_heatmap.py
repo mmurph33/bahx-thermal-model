@@ -5,14 +5,14 @@ drawn as a picture: hot passage on top, metal wall in the middle, cold passage
 on the bottom, each colored by its temperature at that x.
 
 Run from the repo root with either of:
-    python -m model.plot_heatmap
-    python model/plot_heatmap.py
+    python -m scripts.plot_heatmap
+    python scripts/plot_heatmap.py
 """
 
 import sys
 from pathlib import Path
 
-# Running `python model/plot_heatmap.py` puts model/ (not the repo root) on sys.path,
+# Running `python scripts/plot_heatmap.py` puts scripts/ (not the repo root) on sys.path,
 # so `from src import ...` would fail. Add the repo root so both run styles work.
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:

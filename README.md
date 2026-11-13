@@ -29,8 +29,9 @@ bahx-thermal-model/
 │   ├── transient.py      method-of-lines transient, upset scenarios, discrete steady state, quasi-steady fallback
 │   └── metrics.py        thermal-fatigue and ALPEMA metrics, grid-convergence order, smooth max, thermal stress
 ├── tests/                pytest verification checks (see CLAUDE.md "Verification")
+├── scripts/              runnable scripts that solve the model and save figures (run_steady.py, plot_heatmap.py)
 ├── notebooks/            analysis notebooks; import from src/ and only make plots
-├── figures/              saved figures from notebooks
+├── figures/              saved figures from notebooks and scripts
 ├── data/                 small input data (e.g. NIST WebBook spot-check values)
 ├── pytest.ini            puts the repo root on sys.path for tests
 ├── requirements.txt      dependencies with minimum versions
@@ -66,7 +67,16 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-On a fresh clone, `test_setup.py` should pass and every other test should be reported as skipped until its module is implemented.
+On a fresh clone, the setup and steady-state tests should pass; the transient tests are reported as skipped until `transient.py` is implemented.
+
+### Scripts
+
+Run from the repo root (figures are saved to `figures/`):
+
+```bash
+python -m scripts.run_steady     # base-case steady solution: prints duty and closure, saves steady_profiles.png
+python -m scripts.plot_heatmap   # same solution drawn as a temperature map, saves steady_heatmap.png
+```
 
 ### Notebooks
 
