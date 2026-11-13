@@ -183,9 +183,14 @@ def cell_centers(L, N):
     dx : float
         Cell width [m].
     """
-    # 1. dx = L/N; x = (np.arange(N) + 0.5) * dx.
-    # Check: x[0] = dx/2, x[-1] = L - dx/2, len(x) = N.
-    raise NotImplementedError
+
+    # Total exchanger length is divided evenly into N cells
+    dx = L / N
+
+    # Center position of each cell is in the middle
+    x = (np.arrange(N) + 0.5) * dx
+
+    return x, dx
 
 
 def pack_state(T_h, T_c, T_w):
@@ -203,10 +208,16 @@ def pack_state(T_h, T_c, T_w):
     y : ndarray, shape (3N,)
         State vector [K].
     """
-    # 1. y = np.empty(3N); y[0::3] = T_h; y[1::3] = T_c; y[2::3] = T_w
-    #    (or np.column_stack((T_h, T_c, T_w)).ravel()).
-    # Check: unpack_state(pack_state(a, b, c)) returns (a, b, c) exactly.
-    raise NotImplementedError
+
+    # Number of finite volume cells
+    N = len(T_h)
+
+    y = np.empty(3*N)
+    y[0::3] = T_h
+    y[1::3] = T_c
+    y[2::3] = T_w
+
+    return y
 
 
 def unpack_state(y):
@@ -222,10 +233,13 @@ def unpack_state(y):
     T_h, T_c, T_w : ndarray, each shape (N,) or (N, n_t)
         Hot, cold and wall temperatures [K]. Views into y (do not modify).
     """
-    # 1. Return y[0::3], y[1::3], y[2::3]. Slicing along axis 0 works for both
-    #    input shapes; for histories, transpose to (n_t, N) afterwards.
-    # Check: same as pack_state.
-    raise NotImplementedError
+
+    # Opposite of pack_state()
+    T_h = y[0::3]
+    T_c = y[1::3]
+    T_w = y[2::3]
+
+    return T_h, T_c, T_w
 
 
 def jacobian_sparsity(N, axial_conduction):
@@ -248,24 +262,68 @@ def jacobian_sparsity(N, axial_conduction):
     pattern : scipy.sparse matrix, shape (3N, 3N)
         1 where an entry may be nonzero, 0 elsewhere.
     """
-    # 1. Start from sparse.lil_matrix((3N, 3N)) (cheap to fill entry by entry).
-    # 2. For each cell i (Python index 0..N-1), with rows h = 3i, c = 3i+1,
-    #    w = 3i+2:
-    #      hot row h:   own T_h (3i), own T_w (3i+2), upstream T_h (3(i-1)) if i > 0
-    #      cold row c:  own T_c (3i+1), own T_w (3i+2), upstream T_c (3(i+1)+1) if i < N-1
-    #      wall row w:  own T_h, T_c, T_w; plus T_w of cells i-1 and i+1 if
-    #                   axial_conduction
-    #    a_h depends only on the local T_h and a_c only on the local T_c, so no
-    #    other entries appear.
-    # 3. Return pattern.tocsr().
-    # Pitfall: the band is +-3 even without conduction (the upstream gas
-    #    neighbours are 3 positions away). jac_sparsity is ignored if you also
-    #    pass jac=.
-    # Check: compute a dense finite-difference Jacobian of transient_rhs at a
-    #    random in-range state for N = 5; every nonzero must sit inside the
-    #    pattern.
-    raise NotImplementedError
 
+    # Initialize empty sparse matrix (each row = ODE, each column = state variable)
+    pattern = sparse.lil_matrix((3 * N, 3 * N), dtype=int)
+
+    # Loop through each cell
+    for i in range(N):
+        # State vector index
+        h = 3 * i      # Hot
+        c = 3 * i + 1  # Cold
+        w = 3 * i + 2  # Wall
+
+        # Hot gas energy equation (flow in +x direction)
+        pattern[h,h] = 1 # Its own cell temp
+        pattern[h,w] = 1 # Its own wall temp
+
+        if i > 0 :
+            h_upstream = 3 * (i-1)
+            pattern[h, h_upstream] = 1 # Previous cell's hot gas temperature
+
+        # Cold gas energy equation (flow in -x direction)
+        pattern[c,c] = 1
+        pattern[c,w] = 1
+
+        if i < N - 1:
+            c_upstream = 3 * (i-1) + 1
+            pattern[c,c_upstream] = 1 # next cell's cold gas temperature
+
+        # Metal wall energy equation
+        pattern[w,h] = 1
+        pattern[w,c] = 1
+        pattern[w,w] = 1
+
+        # Optional axial wall conduction
+        if axial_conduction:
+            if i > 0:
+                w_left = 3 * (i - 1) + 2
+                pattern[w, w_left] = 1
+
+            if i < N - 1:
+                w_right = 3 * (i + 1) + 2
+                pattern[w, w_right] = 1
+
+    # LIL is convient for constructing the matrix
+    # CSR is more efficient for sparse numerical operations
+    return pattern.tocsr()
+
+# Test script for jacobian_sparsity()
+# import matplotlib.pyplot as plt
+# N_test = 5
+# pattern_no_cond = jacobian_sparsity(N_test, False)
+# pattern_cond = jacobian_sparsity(N_test, True)
+# fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+# axes[0].spy(pattern_no_cond, markersize=10)
+# axes[0].set_title("Without Axial Conduction")
+# axes[0].set_xlabel("State variable")
+# axes[0].set_ylabel("ODE equation")
+# axes[1].spy(pattern_cond, markersize=10)
+# axes[1].set_title("With Axial Conduction")
+# axes[1].set_xlabel("State variable")
+# axes[1].set_ylabel("ODE equation")
+# plt.tight_layout()
+# plt.show()
 
 def smooth_ramp(s, sharpness):
     """Smoothed unit ramp psi(s) for the feed temperature ramp.
