@@ -349,15 +349,19 @@ def smooth_ramp(s, sharpness):
     psi : ndarray, same shape as s
         Ramp fraction, between 0 and 1 [-].
     """
-    # 1. softplus(z) = np.logaddexp(0, z) (overflow-safe for large z).
-    # 2. psi = (softplus(omega s) - softplus(omega (s - 1))) / omega.
-    # Pitfall: psi(0) = ln(2)/omega, not 0, and psi is already slightly
-    #    positive before s = 0. Start the ramp several corner widths after
-    #    t = 0 (ramp_t_start >~ 5 ramp_t/omega) so the initial state is steady.
-    # Check: psi(-10) ~ 0, psi(10) ~ 1, psi(0.5) = 0.5, the maximum slope is
-    #    tanh(omega/4), and psi is monotone.
-    raise NotImplementedError
+    # Purpose: Smoothing out inlet tempeature ramp
 
+    # Convert to numpy array
+    s = np.asarray(s, dtype = float)
+
+    # Calculate the soft plus terms
+    # softplus(z) = ln(1 + exp(z)) 
+    softplus_1 = np.logaddexp(0.0, sharpness * s)
+    softplus_2 = np.logaddexp(0.0, sharpness * (s - 1.0))
+
+    # Calculate smoothed unit ramp
+    psi = (softplus_1 - softplus_2) / sharpness
+    return psi
 
 def boundary_conditions(t, params, scenario):
     """Inlet temperatures and flows at time t for an upset scenario.
@@ -389,23 +393,48 @@ def boundary_conditions(t, params, scenario):
     ValueError
         For an unknown scenario name.
     """
-    # 1. Start from the constant base values (broadcast to the shape of t,
-    #    e.g. with np.full_like(t, value, dtype=float), if t is an array).
-    # 2. "feed_ramp": add ramp_dT * smooth_ramp((t - ramp_t_start)/ramp_t,
-    #    ramp_sharpness) to T_h_in.
-    # 3. "cold_trip": mdot_c(t) as above for t >= trip_t_start, unchanged
-    #    before. Use np.where so array t works.
-    # 4. Unknown scenario: raise ValueError (catches typos like "ramp").
-    # Pitfall: Eq 38 has a slope jump at trip_t_start (the math doc does not
-    #    smooth it, flagged). simulate() splits the integration there so BDF
-    #    never steps across the kink.
-    # Pitfall: the nominal ramp rate is r = ramp_dT/ramp_t. ALPEMA limits are
-    #    measured at the inlet nozzles too, so r itself must satisfy them
-    #    (metrics.check_alpema).
-    # Check: at t = 0 every scenario returns the base values (to ~1e-4 K for
-    #    the ramp); long after the ramp T_h_in -> T_h_in + ramp_dT; long after
-    #    the trip mdot_c -> phi * mdot_c.
-    raise NotImplementedError
+
+    # Initialize all boundary conditions to base values
+    # full_like creates arrays with the same shape as t.
+    T_h_in = np.full_like(t, params["T_h_in"], dtype=float)
+    T_c_in = np.full_like(t, params["T_c_in"], dtype=float)
+
+    mdot_h = np.full_like(t, params["mdot_h"], dtype=float)
+    mdot_c = np.full_like(t, params["mdot_c"], dtype=float)
+
+    # Apply selected scenario:
+    if scenario == "none":
+        pass
+    elif scenario == "feed_ramp":
+        # Smoothly increase inlet side temperature
+        s = (t - params["ramp_t_start"]) / params["ramp_t"]
+        psi = smooth_ramp(s, params["ramp_sharpness"])
+        T_h_in = (
+            T_h_in + params["ramp_dT"] * psi
+        )
+    elif scenario == "cold_trip":
+        # Exponetially reduce cold side flow afte trip
+
+        # Before trip: mdot_c = normal flow
+        # After trip: mdot_c approaches phi * normal flow
+        elapsed = t - params["trip_t_start"]
+
+        mdot_c = np.where(
+            elapsed >= 0.0,
+            params["mdot_c"] * (
+                params["trip_phi"]
+                + (1.0 - params["trip_phi"])
+                * np.exp(-elapsed / params["trip_tau"])
+            ),
+            mdot_c
+        )
+    else:
+        raise ValueError(
+            f"Unknown scenario '{scenario}'. "
+            "Choose 'none', 'feed_ramp', or 'cold_trip'."
+        )
+
+    return T_h_in, T_c_in, mdot_h, mdot_c
 
 
 def transient_rhs(t, y, params, props, geom, scenario):
