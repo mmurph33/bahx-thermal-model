@@ -52,7 +52,10 @@ from scipy import sparse
 from scipy.integrate import solve_ivp
 from scipy.optimize import root
 
-import correlations, properties, steady
+# Import through the src package (run code from the repo root: pytest, or
+# python -m scripts.<name>). A bare `import correlations` only works when the
+# current directory is src/, and breaks every caller that imports src.transient.
+from src import correlations, properties, steady
 
 
 def time_scales(params, props):
@@ -79,8 +82,16 @@ def time_scales(params, props):
         "kappa" [-], "stiffness" [-], "t_response" = (1 + kappa) * max tau_res [s]
         (order of the whole-exchanger response time, Section 6.2).
     """
+    # Pseudocode: steps 1-10 below. Representative properties are the lambda = 0
+    #    surrogates (mean cp, mu, k) evaluated at T_bar (rho at T_bar), with the
+    #    conductances at those properties, as in steady.initial_guess.
+    # Report kappa: the math doc asks for the base-case value in week 1. If
+    #    kappa >> 1, the quasi-steady fallback (Section 6.4) is attractive.
+    # Check: a hand calculation for the base case gives kappa of order 5-10
+    #    and tau_res of order seconds; the cold gas time tau_g_c is the
+    #    fastest scale, which is why the system is stiff.
 
-    # 1. Calculate exhcanger geometry
+    # 1. Calculate exchanger geometry
     geom = correlations.exchanger_geometry(params)
 
     # 2. Find representative properties (surrogate mean values and properties)
@@ -120,7 +131,7 @@ def time_scales(params, props):
     )
 
     tau_res_c = (
-        rho_c * geom["h"]["A_ff"] * params["L"] / params["mdot_c"]
+        rho_c * geom["c"]["A_ff"] * params["L"] / params["mdot_c"]
     )
 
     # 5. Calculate gas to metal equilibriation time
@@ -183,12 +194,14 @@ def cell_centers(L, N):
     dx : float
         Cell width [m].
     """
+    # 1. dx = L/N; x = (np.arange(N) + 0.5) * dx.
+    # Check: x[0] = dx/2, x[-1] = L - dx/2, len(x) = N.
 
     # Total exchanger length is divided evenly into N cells
     dx = L / N
 
     # Center position of each cell is in the middle
-    x = (np.arrange(N) + 0.5) * dx
+    x = (np.arange(N) + 0.5) * dx
 
     return x, dx
 
@@ -208,6 +221,9 @@ def pack_state(T_h, T_c, T_w):
     y : ndarray, shape (3N,)
         State vector [K].
     """
+    # 1. y = np.empty(3N); y[0::3] = T_h; y[1::3] = T_c; y[2::3] = T_w
+    #    (or np.column_stack((T_h, T_c, T_w)).ravel()).
+    # Check: unpack_state(pack_state(a, b, c)) returns (a, b, c) exactly.
 
     # Number of finite volume cells
     N = len(T_h)
@@ -233,6 +249,9 @@ def unpack_state(y):
     T_h, T_c, T_w : ndarray, each shape (N,) or (N, n_t)
         Hot, cold and wall temperatures [K]. Views into y (do not modify).
     """
+    # 1. Return y[0::3], y[1::3], y[2::3]. Slicing along axis 0 works for both
+    #    input shapes; for histories, transpose to (n_t, N) afterwards.
+    # Check: same as pack_state.
 
     # Opposite of pack_state()
     T_h = y[0::3]
@@ -262,6 +281,22 @@ def jacobian_sparsity(N, axial_conduction):
     pattern : scipy.sparse matrix, shape (3N, 3N)
         1 where an entry may be nonzero, 0 elsewhere.
     """
+    # 1. Start from sparse.lil_matrix((3N, 3N)) (cheap to fill entry by entry).
+    # 2. For each cell i (Python index 0..N-1), with rows h = 3i, c = 3i+1,
+    #    w = 3i+2:
+    #      hot row h:   own T_h (3i), own T_w (3i+2), upstream T_h (3(i-1)) if i > 0
+    #      cold row c:  own T_c (3i+1), own T_w (3i+2), upstream T_c (3(i+1)+1) if i < N-1
+    #      wall row w:  own T_h, T_c, T_w; plus T_w of cells i-1 and i+1 if
+    #                   axial_conduction
+    #    a_h depends only on the local T_h and a_c only on the local T_c, so no
+    #    other entries appear.
+    # 3. Return pattern.tocsr().
+    # Pitfall: the band is +-3 even without conduction (the upstream gas
+    #    neighbours are 3 positions away). jac_sparsity is ignored if you also
+    #    pass jac=.
+    # Check: compute a dense finite-difference Jacobian of transient_rhs at a
+    #    random in-range state for N = 5; every nonzero must sit inside the
+    #    pattern.
 
     # Initialize empty sparse matrix (each row = ODE, each column = state variable)
     pattern = sparse.lil_matrix((3 * N, 3 * N), dtype=int)
@@ -281,12 +316,13 @@ def jacobian_sparsity(N, axial_conduction):
             h_upstream = 3 * (i-1)
             pattern[h, h_upstream] = 1 # Previous cell's hot gas temperature
 
-        # Cold gas energy equation (flow in -x direction)
+        # Cold gas energy equation (flow in -x direction, so the upstream
+        # cell is i+1, not i-1)
         pattern[c,c] = 1
         pattern[c,w] = 1
 
         if i < N - 1:
-            c_upstream = 3 * (i-1) + 1
+            c_upstream = 3 * (i+1) + 1
             pattern[c,c_upstream] = 1 # next cell's cold gas temperature
 
         # Metal wall energy equation
@@ -349,7 +385,15 @@ def smooth_ramp(s, sharpness):
     psi : ndarray, same shape as s
         Ramp fraction, between 0 and 1 [-].
     """
-    # Purpose: Smoothing out inlet tempeature ramp
+    # 1. softplus(z) = np.logaddexp(0, z) (overflow-safe for large z).
+    # 2. psi = (softplus(omega s) - softplus(omega (s - 1))) / omega.
+    # Pitfall: psi(0) = ln(2)/omega, not 0, and psi is already slightly
+    #    positive before s = 0. Start the ramp several corner widths after
+    #    t = 0 (ramp_t_start >~ 5 ramp_t/omega) so the initial state is steady.
+    # Check: psi(-10) ~ 0, psi(10) ~ 1, psi(0.5) = 0.5, the maximum slope is
+    #    tanh(omega/4), and psi is monotone.
+
+    # Purpose: Smoothing out inlet temperature ramp
 
     # Convert to numpy array
     s = np.asarray(s, dtype = float)
@@ -393,6 +437,22 @@ def boundary_conditions(t, params, scenario):
     ValueError
         For an unknown scenario name.
     """
+    # 1. Start from the constant base values (broadcast to the shape of t,
+    #    e.g. with np.full_like(t, value, dtype=float), if t is an array).
+    # 2. "feed_ramp": add ramp_dT * smooth_ramp((t - ramp_t_start)/ramp_t,
+    #    ramp_sharpness) to T_h_in.
+    # 3. "cold_trip": mdot_c(t) as above for t >= trip_t_start, unchanged
+    #    before. Use np.where so array t works.
+    # 4. Unknown scenario: raise ValueError (catches typos like "ramp").
+    # Pitfall: Eq 38 has a slope jump at trip_t_start (the math doc does not
+    #    smooth it, flagged). simulate() splits the integration there so BDF
+    #    never steps across the kink.
+    # Pitfall: the nominal ramp rate is r = ramp_dT/ramp_t. ALPEMA limits are
+    #    measured at the inlet nozzles too, so r itself must satisfy them
+    #    (metrics.check_alpema).
+    # Check: at t = 0 every scenario returns the base values (to ~1e-4 K for
+    #    the ramp); long after the ramp T_h_in -> T_h_in + ramp_dT; long after
+    #    the trip mdot_c -> phi * mdot_c.
 
     # Initialize all boundary conditions to base values
     # full_like creates arrays with the same shape as t.
@@ -424,7 +484,7 @@ def boundary_conditions(t, params, scenario):
             params["mdot_c"] * (
                 params["trip_phi"]
                 + (1.0 - params["trip_phi"])
-                * np.exp(-elapsed / params["trip_tau"])
+                * np.exp(-elapsed / params["trip_tau_v"])
             ),
             mdot_c
         )
@@ -514,7 +574,47 @@ def transient_rhs(t, y, params, props, geom, scenario):
     #    to round-off (the exchange terms cancel pairwise and the ghost cells
     #    are adiabatic). This catches a wrong cold sign without integrating.
     #    (c) The pattern from jacobian_sparsity covers the FD Jacobian.
-    raise NotImplementedError
+    N = y.size // 3
+    dx = params["L"] / N
+    T_h, T_c, T_w = unpack_state(y)
+    T_h_in, T_c_in, mdot_h, mdot_c = boundary_conditions(t, params, scenario)
+
+    # Donor (upstream) temperature of each cell. Hot flows +x, so cell i is
+    # fed by cell i-1 (and cell 1 by the hot inlet). Cold flows -x, so cell i
+    # is fed by cell i+1 (and cell N by the cold inlet).
+    T_h_up = np.concatenate(([T_h_in], T_h[:-1]))
+    T_c_up = np.concatenate((T_c[1:], [T_c_in]))
+
+    # Net enthalpy carried into each cell by the flow [W] (Eq 32-33).
+    adv_h = mdot_h * (properties.enthalpy(props["h"], T_h_up) - properties.enthalpy(props["h"], T_h))
+    adv_c = mdot_c * (properties.enthalpy(props["c"], T_c_up) - properties.enthalpy(props["c"], T_c))
+
+    # Heat exchanged with the metal in each cell [W]. a_c uses the current
+    # mdot_c(t), which falls during a trip.
+    a_h, a_c = correlations.conductances(T_h, T_c, mdot_h, mdot_c, params, props, geom)
+    Q_hw = a_h * dx * (T_h - T_w)  # hot gas -> metal
+    Q_wc = a_c * dx * (T_w - T_c)  # metal -> cold gas
+
+    # Axial conduction in the metal [W] (Eq 34), adiabatic ends via ghost
+    # cells T_w,0 = T_w,1 and T_w,N+1 = T_w,N.
+    if params["axial_conduction"]:
+        T_pad = np.concatenate(([T_w[0]], T_w, [T_w[-1]]))
+        cond = params["k_m"] * geom["A_m"] / dx * (T_pad[2:] - 2.0 * T_pad[1:-1] + T_pad[:-2])
+    else:
+        cond = np.zeros(N)
+
+    # Cell heat capacities [J/K], gas properties at each gas's own temperature.
+    M_h = properties.evaluate(props["h"], "rho", T_h) * geom["h"]["A_ff"] * properties.evaluate(props["h"], "cp", T_h) * dx
+    M_c = properties.evaluate(props["c"], "rho", T_c) * geom["c"]["A_ff"] * properties.evaluate(props["c"], "cp", T_c) * dx
+    M_w = geom["C_m"] * dx
+
+    # Energy balances (Eq 32-34). The cold gas GAINS heat from the metal, so
+    # Q_wc enters its balance with a plus sign.
+    dTh_dt = (adv_h - Q_hw) / M_h
+    dTc_dt = (adv_c + Q_wc) / M_c
+    dTw_dt = (cond + Q_hw - Q_wc) / M_w
+
+    return pack_state(dTh_dt, dTc_dt, dTw_dt)
 
 
 def steady_to_cells(steady_result, N):
@@ -542,7 +642,12 @@ def steady_to_cells(steady_result, N):
     #    the BVP). Use the result only as the guess for discrete_steady_state.
     # Check: transient_rhs at this state is O(dx) in interior cells and
     #    largest in hot cell 1 and cold cell N.
-    raise NotImplementedError
+    L = steady_result["x"][-1]
+    x_cells, _ = cell_centers(L, N)
+    T_h = np.interp(x_cells, steady_result["x"], steady_result["T_h"])
+    T_c = np.interp(x_cells, steady_result["x"], steady_result["T_c"])
+    T_w = np.interp(x_cells, steady_result["x"], steady_result["T_w"])
+    return pack_state(T_h, T_c, T_w)
 
 
 def discrete_steady_state(params, props, scenario="none", y_guess=None):
@@ -581,6 +686,9 @@ def discrete_steady_state(params, props, scenario="none", y_guess=None):
     #    lambda t, y: F(y)), method "BDF", jac_sparsity from
     #    jacobian_sparsity, over ~10 x time_scales(...)["t_response"]. This
     #    is robust because the physics itself relaxes to the steady state.
+    #    Set first_step to a fraction of the fastest discrete time scale: the
+    #    guess has large rates in the two inlet cells, and solve_ivp's
+    #    automatic first step can push them out of the fitted range.
     # 5. Polish: scipy.optimize.root(F, y_relaxed, method="hybr") (dense
     #    finite-difference Jacobian, fine up to 3N ~ 1000), or
     #    scipy.optimize.least_squares(F, y_relaxed, jac_sparsity=pattern)
@@ -589,7 +697,57 @@ def discrete_steady_state(params, props, scenario="none", y_guess=None):
     # Check: tests/test_transient.py::test_transient_stays_at_steady_state;
     #    the gap to steady.solve_steady at the cell centres roughly halves when
     #    N doubles (first-order upwinding).
-    raise NotImplementedError
+    geom = correlations.exchanger_geometry(params)
+    N = params["N"]
+    if y_guess is None:
+        y_guess = steady_to_cells(steady.solve_steady(params, props), N)
+
+    def F(y):
+        """Discrete model right-hand side with the boundary values held at t = 0."""
+        return transient_rhs(0.0, y, params, props, geom, scenario)
+
+    # Pseudo-transient relaxation: let the physics itself carry the guess
+    # toward the steady state.
+    scales = time_scales(params, props)
+    t_relax = 10.0 * scales["t_response"]
+    # The guess has rates of ~10-100 K/s in the two inlet cells (see
+    # steady_to_cells). solve_ivp's automatic first step is an explicit probe
+    # sized from the RMS rate, which dilutes those two cells at large N and
+    # can push them out of the fitted range. Start instead at a tenth of the
+    # fastest time scale of the discrete system, min(tau_g, tau_res/N)
+    # (Section 6.2).
+    fastest = min(
+        scales["tau_g_h"], scales["tau_g_c"],
+        scales["tau_res_h"] / N, scales["tau_res_c"] / N,
+    )
+    relax = solve_ivp(
+        lambda t, y: F(y),
+        (0.0, t_relax),
+        y_guess,
+        method="BDF",
+        jac_sparsity=jacobian_sparsity(N, params["axial_conduction"]),
+        rtol=params["ivp_rtol"],
+        atol=params["ivp_atol"],
+        first_step=0.1 * fastest,
+    )
+    if not relax.success:
+        raise RuntimeError(f"Steady-state relaxation failed: {relax.message}")
+
+    # Newton-type polish (MINPACK hybrd). xtol is tight because the residual
+    # is in K/s: a state error of 1e-11 K times the fastest rate (~1e3 1/s at
+    # large N) is ~1e-8 K/s.
+    polish = root(F, relax.y[:, -1], method="hybr", options={"xtol": 1.0e-13})
+    y_ss = polish.x
+
+    # Judge convergence by the residual itself, not by root's status flag
+    # (hybrd can report slow progress once it is already at round-off).
+    residual = np.max(np.abs(F(y_ss)))
+    if residual > 1.0e-8:
+        raise RuntimeError(
+            f"Discrete steady state not converged: max |F| = {residual:.2e} K/s "
+            f"({polish.message})"
+        )
+    return y_ss
 
 
 def quasi_steady_gas(T_w, t, params, props, geom, scenario):
@@ -600,6 +758,10 @@ def quasi_steady_gas(T_w, t, params, props, geom, scenario):
     exactly cell by cell with properties frozen in the cell:
       T_h,i = T_w,i + (T_h,i-1 - T_w,i) exp(-a_h,i dx/(mdot_h cp_h,i)),  i = 1..N
       T_c,i = T_w,i + (T_c,i+1 - T_w,i) exp(-a_c,i dx/(mdot_c cp_c,i)),  i = N..1
+    Implemented instead with the donor-cell update of the full model,
+    T_i = T_w,i + (T_up - T_w,i)/(1 + NTU_cell), with a and cp at the
+    upstream temperature (see the flag below; math doc Eq 36 should be
+    updated, or the code switched to exp, by team decision).
 
     Parameters
     ----------
@@ -631,7 +793,36 @@ def quasi_steady_gas(T_w, t, params, props, geom, scenario):
     #    difference in the report).
     # Check: with T_w uniform and equal to T_h_in, T_h stays at T_h_in; with
     #    very large a, T_h -> T_w and T_c -> T_w cell by cell.
-    raise NotImplementedError
+    # Implemented with the 1/(1 + NTU_cell) update recommended above, so that
+    #    with constant properties this model is exactly the full model with
+    #    the gas storage removed (see the flag in the docstring).
+    N = T_w.size
+    dx = params["L"] / N
+    k_f = params["k_f"]
+    T_h_in, T_c_in, mdot_h, mdot_c = boundary_conditions(t, params, scenario)
+
+    # Hot sweep in the direction of hot flow (x = 0 -> L).
+    T_h = np.empty(N)
+    T_up = T_h_in
+    for i in range(N):
+        a_h = correlations.side_conductance(T_up, mdot_h, props["h"], geom["h"], k_f)
+        cp_h = properties.evaluate(props["h"], "cp", T_up)
+        NTU_cell = a_h * dx / (mdot_h * cp_h)
+        # Donor-cell balance with no storage: mdot cp (T_up - T_i) = a dx (T_i - T_w)
+        T_h[i] = T_w[i] + (T_up - T_w[i]) / (1.0 + NTU_cell)
+        T_up = T_h[i]
+
+    # Cold sweep in the direction of cold flow (x = L -> 0).
+    T_c = np.empty(N)
+    T_up = T_c_in
+    for i in range(N - 1, -1, -1):
+        a_c = correlations.side_conductance(T_up, mdot_c, props["c"], geom["c"], k_f)
+        cp_c = properties.evaluate(props["c"], "cp", T_up)
+        NTU_cell = a_c * dx / (mdot_c * cp_c)
+        T_c[i] = T_w[i] + (T_up - T_w[i]) / (1.0 + NTU_cell)
+        T_up = T_c[i]
+
+    return T_h, T_c
 
 
 def quasi_steady_rhs(t, T_w, params, props, geom, scenario):
@@ -667,7 +858,30 @@ def quasi_steady_rhs(t, T_w, params, props, geom, scenario):
     #    with only N unknowns a dense Jacobian is cheap.
     # Check: at the discrete steady state of this model dTw_dt = 0; with
     #    kappa large, the wall histories match the full model's closely.
-    raise NotImplementedError
+    N = T_w.size
+    dx = params["L"] / N
+    T_h, T_c = quasi_steady_gas(T_w, t, params, props, geom, scenario)
+    T_h_in, T_c_in, mdot_h, mdot_c = boundary_conditions(t, params, scenario)
+
+    # Upstream (donor) temperatures, as in transient_rhs.
+    T_h_up = np.concatenate(([T_h_in], T_h[:-1]))
+    T_c_up = np.concatenate((T_c[1:], [T_c_in]))
+
+    # Heat delivered to the metal = enthalpy the two gases give up crossing
+    # the cell (enthalpy form, so the total telescopes to the inlet/outlet
+    # enthalpy flows exactly, as in the full model).
+    Q = (
+        mdot_h * (properties.enthalpy(props["h"], T_h_up) - properties.enthalpy(props["h"], T_h))
+        + mdot_c * (properties.enthalpy(props["c"], T_c_up) - properties.enthalpy(props["c"], T_c))
+    )
+
+    if params["axial_conduction"]:
+        T_pad = np.concatenate(([T_w[0]], T_w, [T_w[-1]]))
+        cond = params["k_m"] * geom["A_m"] / dx * (T_pad[2:] - 2.0 * T_pad[1:-1] + T_pad[:-2])
+    else:
+        cond = np.zeros(N)
+
+    return (Q + cond) / (geom["C_m"] * dx)
 
 
 def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full"):
@@ -693,8 +907,8 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
         enough to resolve the upset (e.g. 2001 points).
     y0 : ndarray, optional
         Initial state, shape (3N,) (full) or (N,) (quasi_steady). Default:
-        discrete_steady_state(params, props, scenario) (wall part only for
-        quasi_steady).
+        discrete_steady_state(params, props, scenario); for quasi_steady,
+        its wall part polished to the quasi-steady model's own steady state.
     model : str, optional
         "full" or "quasi_steady".
 
@@ -710,7 +924,9 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
     """
     # 1. geom = correlations.exchanger_geometry(params); N = params["N"];
     #    x, dx = cell_centers(L, N).
-    # 2. y0 as described above.
+    # 2. y0 as described above. For "quasi_steady", polish the full model's
+    #    wall profile with a root solve on quasi_steady_rhs, so the start is
+    #    the steady state of the model actually being integrated.
     # 3. rhs(t, y) = transient_rhs(t, y, params, props, geom, scenario) for
     #    "full", or quasi_steady_rhs(...) for "quasi_steady".
     # 4. solve_ivp(rhs, (0, t_end), y0, method="BDF", t_eval=t_eval,
@@ -739,4 +955,114 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
     # Check: scenario "none" from the discrete steady state stays put
     #    (tests/test_transient.py). A run with N, 2N, 4N gives observed order
     #    ~1 in a smooth output (metrics.observed_order).
-    raise NotImplementedError
+    if model not in ("full", "quasi_steady"):
+        raise ValueError(f"model must be 'full' or 'quasi_steady', not {model!r}")
+
+    geom = correlations.exchanger_geometry(params)
+    N = params["N"]
+    x, _ = cell_centers(params["L"], N)
+    if t_eval is None:
+        t_eval = np.linspace(0.0, t_end, 2001)
+    t_eval = np.asarray(t_eval, dtype=float)
+
+    # Right-hand side and Jacobian pattern of the chosen model.
+    if model == "full":
+        def rhs(t, y):
+            return transient_rhs(t, y, params, props, geom, scenario)
+        jac_sparsity = jacobian_sparsity(N, params["axial_conduction"])
+    else:
+        def rhs(t, T_w):
+            return quasi_steady_rhs(t, T_w, params, props, geom, scenario)
+        jac_sparsity = None  # the gas sweeps make this Jacobian dense
+
+    # Initial state: the steady state of the discrete model being integrated.
+    if y0 is None:
+        y_full = discrete_steady_state(params, props, scenario)
+        if model == "full":
+            y0 = y_full
+        else:
+            # The full model's wall profile is O(dx) away from the quasi-steady
+            # model's own steady state (properties are lagged one cell in the
+            # sweeps), so polish it with a root solve on the N wall unknowns.
+            _, _, T_w_full = unpack_state(y_full)
+            y0 = root(lambda T_w: rhs(0.0, T_w), T_w_full, method="hybr").x
+
+    # Feed ramp: nothing happens before it starts, so BDF would grow its step
+    # and could jump straight over a short ramp.
+    max_step = np.inf
+    if scenario == "feed_ramp":
+        max_step = params["ramp_t"] / 20.0
+
+    # Cold trip: Eq 38 has a slope jump at trip_t_start, so integrate up to it
+    # and restart from there; BDF never steps across the kink.
+    t_breaks = [0.0, t_end]
+    if scenario == "cold_trip" and 0.0 < params["trip_t_start"] < t_end:
+        t_breaks = [0.0, params["trip_t_start"], t_end]
+
+    sols = []
+    t_parts = []
+    y_parts = []
+    y_start = np.asarray(y0, dtype=float)
+    for k in range(len(t_breaks) - 1):
+        t_a, t_b = t_breaks[k], t_breaks[k + 1]
+        # Each saved time belongs to exactly one segment.
+        if k == 0:
+            in_segment = (t_eval >= t_a) & (t_eval <= t_b)
+        else:
+            in_segment = (t_eval > t_a) & (t_eval <= t_b)
+
+        # Implicit BDF only: the system is stiff (Section 6.2).
+        sol = solve_ivp(
+            rhs,
+            (t_a, t_b),
+            y_start,
+            method="BDF",
+            t_eval=t_eval[in_segment],
+            rtol=params["ivp_rtol"],
+            atol=params["ivp_atol"],
+            dense_output=True,
+            jac_sparsity=jac_sparsity,
+            max_step=max_step,
+        )
+        if not sol.success:
+            raise RuntimeError(f"Transient solve failed on [{t_a}, {t_b}] s: {sol.message}")
+        sols.append(sol)
+        t_parts.append(sol.t)
+        y_parts.append(sol.y)
+        y_start = sol.sol(t_b)  # state at the end of this segment
+
+    t = np.concatenate(t_parts)
+    Y = np.concatenate(y_parts, axis=1)  # shape (n_state, n_t)
+
+    # Rates straight from the right-hand side at the saved times (CLAUDE.md:
+    # never np.gradient of the solution).
+    dY = np.empty_like(Y)
+    for k in range(t.size):
+        dY[:, k] = rhs(t[k], Y[:, k])
+
+    # Histories, each shape (n_t, N).
+    if model == "full":
+        T_h, T_c, T_w = (field.T for field in unpack_state(Y))
+        dTh_dt, dTc_dt, dTw_dt = (field.T for field in unpack_state(dY))
+    else:
+        T_w = Y.T
+        dTw_dt = dY.T
+        dTh_dt = None  # the gas is algebraic in this model, so no gas rates
+        dTc_dt = None
+        T_h = np.empty_like(T_w)
+        T_c = np.empty_like(T_w)
+        for k in range(t.size):
+            T_h[k], T_c[k] = quasi_steady_gas(T_w[k], t[k], params, props, geom, scenario)
+
+    T_h_in, T_c_in, mdot_h, mdot_c = boundary_conditions(t, params, scenario)
+
+    return {
+        "t": t,
+        "x": x,
+        "T_h": T_h, "T_c": T_c, "T_w": T_w,
+        "dTh_dt": dTh_dt, "dTc_dt": dTc_dt, "dTw_dt": dTw_dt,
+        "T_h_in": T_h_in, "T_c_in": T_c_in, "mdot_h": mdot_h, "mdot_c": mdot_c,
+        "sol": sols[0] if len(sols) == 1 else sols,
+        "N": N,
+        "model": model,
+    }
