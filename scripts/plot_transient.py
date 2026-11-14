@@ -207,7 +207,7 @@ def main():
     r, t_open, t_settle = run_startup(params)
     make_animation(r, t_open, t_settle, params)
     make_snapshots(r, params)
-    print(f"saved {FIG_DIR / 'startup.gif'} and {FIG_DIR / 'startup_snapshots.png'}")
+    print("saved figures/startup.gif and figures/startup_snapshots.png")
 
 
 if __name__ == "__main__":
