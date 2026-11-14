@@ -554,11 +554,12 @@ def build_surrogates(params, scenario="none"):
     ----------
     params : dict
         Flat parameter dict (config.BASE_CASE copy). Uses fluid, p_h, p_c,
-        T_h_in, T_c_in, ramp_dT (for "feed_ramp"), fit_degree, fit_n_points,
-        fit_T_margin, fit_max_rel_err.
+        T_h_in, T_c_in, ramp_dT (for "feed_ramp" and "both_ramp"), ramp_dT_c
+        (for "both_ramp"), startup_T0 (for "startup"), fit_degree,
+        fit_n_points, fit_T_margin, fit_max_rel_err.
     scenario : str
-        "none", "feed_ramp" or "cold_trip"; decides whether the hot inlet
-        temperature moves during the run.
+        "none", "feed_ramp", "cold_trip", "both_ramp" or "startup"; decides
+        which temperatures the run can reach.
 
     Returns
     -------
@@ -584,6 +585,16 @@ def build_surrogates(params, scenario="none"):
             T_min = min(T_min, T_max + ramp_dT)
         else:
             T_max = T_max + ramp_dT
+    elif scenario == "both_ramp":
+        # Both inlets move: the range must hold every inlet value over the run,
+        # hot from T_h_in to T_h_in + ramp_dT and cold from T_c_in to T_c_in + ramp_dT_c.
+        inlet_values = (params["T_h_in"], params["T_h_in"] + params["ramp_dT"],
+                        params["T_c_in"], params["T_c_in"] + params["ramp_dT_c"])
+        T_min, T_max = min(inlet_values), max(inlet_values)
+    elif scenario == "startup":
+        # The idle core starts at startup_T0, which may lie outside the inlet range.
+        T_min = min(T_min, params["startup_T0"])
+        T_max = max(T_max, params["startup_T0"])
 
     # Add margins to ensure surrogate covers full range
     T_lo = T_min - params["fit_T_margin"]

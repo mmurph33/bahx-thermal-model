@@ -44,7 +44,7 @@ with CoolProp 8.0 (methane):
 
 # Valid values of the ``scenario`` argument used by properties, transient and
 # metrics. The numbers for each scenario live in BASE_CASE group 5.
-SCENARIOS = ("none", "feed_ramp", "cold_trip")
+SCENARIOS = ("none", "feed_ramp", "cold_trip", "both_ramp", "startup")
 
 
 BASE_CASE = {
@@ -163,6 +163,11 @@ BASE_CASE = {
     # The property fit range is widened to cover T_h_in + ramp_dT.
     # TODO: start ~10.
     "ramp_dT": 10.0,
+    # Delta T_r,c [K]: size of the cold-inlet change in scenario "both_ramp",
+    # where both inlets follow the same smoothed ramp (same ramp_t,
+    # ramp_t_start, ramp_sharpness): hot by ramp_dT, cold by ramp_dT_c.
+    # Equal values shift both inlets together (a warm-up of the whole core).
+    "ramp_dT_c": 10.0,
     # t_r [s]: ramp duration. Nominal ramp rate r = ramp_dT/ramp_t; 300 s with
     # 10 K gives 2 K/min, between the 1 and 5 degC/min ALPEMA limits.
     # TODO: start ~300.
@@ -187,6 +192,18 @@ BASE_CASE = {
     # t_start [s]: when the valve starts closing.
     # TODO: start ~60.
     "trip_t_start": 60.0,
+    # Startup from rest, scenario "startup": the idle core and the gas in it
+    # start at one uniform temperature with no flow; then both flows open
+    # together along the smoothed ramp (shape set by ramp_sharpness):
+    #   mdot(t) = mdot * psi((t - startup_t_start)/startup_t_flow)
+    # while both inlet temperatures stay at T_h_in and T_c_in.
+    # T_0 [K]: uniform initial temperature of the idle core (ambient). Equal to
+    # T_h_in, so at first only the cold gas changes the core.
+    "startup_T0": 300.0,
+    # t_start [s]: when the flows start to open (a short still period first).
+    "startup_t_start": 10.0,
+    # t_open [s]: time for both flows to go from zero to full.
+    "startup_t_flow": 20.0,
 
     # ------------------------------------------------------------------
     # 6. Model options (Section 6.1)
@@ -266,4 +283,18 @@ ALPEMA_LIMITS = {
     "dT_stream_stream": 30.0,
     # Max stream-to-metal temperature difference [degC].
     "dT_stream_metal": 30.0,
+}
+
+
+# Strength of the core metal, used as a reference level in the thermal stress
+# check (src/stress.py; math doc Section 9.2, Eq 53). ALPEMA does not set a
+# stress limit: it limits temperature differences and rates (above), and the
+# pressure design follows a vessel code such as ASME VIII Div. 1. The ALPEMA
+# Standards list 3003 aluminium for the core matrix (fins, parting sheets, side
+# bars). Brazing (~600 degC) anneals it, so O-temper values apply.
+MATERIAL_LIMITS = {
+    # Minimum 0.2 % proof (yield) strength of 3003-O sheet [Pa]
+    # (ASTM B209M / EN 485-2: 35 MPa). Room-temperature value; aluminium gets
+    # slightly stronger, not weaker, as it is cooled, so this is conservative.
+    "sigma_y_3003_O": 35.0e6,
 }

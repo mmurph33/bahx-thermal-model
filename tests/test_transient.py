@@ -244,6 +244,67 @@ def test_smooth_ramp_properties():
     assert np.max(slope) == pytest.approx(np.tanh(omega / 4.0), rel=1e-6)
 
 
+def test_both_ramp_relaxes_to_new_steady_state():
+    """After both inlets ramp, the transient settles on the steady state at the new inlets.
+
+    CLAUDE.md check 3 (second half) for scenario "both_ramp". Unequal ramps
+    (hot +5 K, cold +3 K) check that each inlet gets its own change. The run is
+    extended until the state stops changing (max |dy/dt| < 1e-8 K/s, as in
+    test_transient_relaxes_to_new_steady_state), then compared with the
+    discrete steady state at the new inlet temperatures.
+    """
+    params = base_case_params(
+        ramp_dT=5.0, ramp_dT_c=3.0, ramp_t=10.0, ramp_t_start=5.0, ramp_sharpness=20.0,
+        N=50, ivp_rtol=1e-8, ivp_atol=1e-8,
+    )
+    props = properties.build_surrogates(params, "both_ramp")
+    geom = correlations.exchanger_geometry(params)
+    t_end = 10.0 * transient.time_scales(params, props)["t_response"]
+    for _ in range(6):
+        r = transient.simulate(params, props, "both_ramp", t_end, t_eval=np.linspace(0.0, t_end, 201))
+        y_final = transient.pack_state(r["T_h"][-1], r["T_c"][-1], r["T_w"][-1])
+        rate = np.max(np.abs(transient.transient_rhs(t_end, y_final, params, props, geom, "both_ramp")))
+        if rate < 1e-8:
+            break
+        t_end *= 2.0
+    else:
+        pytest.fail(f"still changing at {rate:.1e} K/s after t = {t_end / 2:.0f} s")
+
+    p_new = dict(params, T_h_in=params["T_h_in"] + params["ramp_dT"],
+                 T_c_in=params["T_c_in"] + params["ramp_dT_c"])
+    y_new = transient.discrete_steady_state(p_new, props, "none")
+    assert np.max(np.abs(y_final - y_new)) < 1e-5
+
+
+def test_startup_from_rest_reaches_the_base_steady_state():
+    """A startup from a uniform idle core ends at the base-case steady state.
+
+    CLAUDE.md check 3 (second half) for scenario "startup": the end state must
+    not depend on the initial condition, so after the flows open it must match
+    the discrete steady state of the base case. The run is extended until the
+    state stops changing (max |dy/dt| < 1e-8 K/s).
+    """
+    params = base_case_params(N=50, ivp_rtol=1e-8, ivp_atol=1e-8)
+    props = properties.build_surrogates(params, "startup")
+    geom = correlations.exchanger_geometry(params)
+    t_end = params["startup_t_start"] + params["startup_t_flow"] + \
+        10.0 * transient.time_scales(params, props)["t_response"]
+    for _ in range(6):
+        r = transient.simulate(params, props, "startup", t_end, t_eval=np.linspace(0.0, t_end, 201))
+        # Starts from the uniform idle core (simulate's default y0 for "startup").
+        assert np.all(r["T_w"][0] == params["startup_T0"])
+        y_final = transient.pack_state(r["T_h"][-1], r["T_c"][-1], r["T_w"][-1])
+        rate = np.max(np.abs(transient.transient_rhs(t_end, y_final, params, props, geom, "startup")))
+        if rate < 1e-8:
+            break
+        t_end *= 2.0
+    else:
+        pytest.fail(f"still changing at {rate:.1e} K/s after t = {t_end / 2:.0f} s")
+
+    y_base = transient.discrete_steady_state(params, props, "none")
+    assert np.max(np.abs(y_final - y_base)) < 1e-5
+
+
 def test_boundary_conditions_scenarios():
     """Base values at t = 0; ramp and trip reach their end values; bad names raise."""
     params = base_case_params()
@@ -269,6 +330,27 @@ def test_boundary_conditions_scenarios():
     t_late = params["ramp_t_start"] + 10.0 * params["ramp_t"]
     T_h_in, _, _, _ = transient.boundary_conditions(t_late, params, "feed_ramp")
     assert T_h_in == pytest.approx(params["T_h_in"] + params["ramp_dT"], abs=1e-9)
+
+    # both_ramp: each inlet reaches its own new value; the flows do not change.
+    t_late = params["ramp_t_start"] + 10.0 * params["ramp_t"]
+    T_h_in, T_c_in, mdot_h, mdot_c = transient.boundary_conditions(t_late, params, "both_ramp")
+    assert T_h_in == pytest.approx(params["T_h_in"] + params["ramp_dT"], abs=1e-9)
+    assert T_c_in == pytest.approx(params["T_c_in"] + params["ramp_dT_c"], abs=1e-9)
+    assert (mdot_h, mdot_c) == (params["mdot_h"], params["mdot_c"])
+
+    # startup: no flow before the valves open, full flow long after; inlet
+    # temperatures never change. psi(-t_start/t_flow) is the smoothed ramp's
+    # small offset at t = 0 (same bound as the feed ramp above).
+    s0 = -params["startup_t_start"] / params["startup_t_flow"]
+    psi0 = (math.log1p(math.exp(omega * s0)) - math.log1p(math.exp(omega * (s0 - 1.0)))) / omega
+    T_h_in, T_c_in, mdot_h, mdot_c = transient.boundary_conditions(0.0, params, "startup")
+    assert (T_h_in, T_c_in) == (params["T_h_in"], params["T_c_in"])
+    assert mdot_h == pytest.approx(psi0 * params["mdot_h"], rel=1e-9)
+    assert mdot_c == pytest.approx(psi0 * params["mdot_c"], rel=1e-9)
+    assert psi0 < 1e-3
+    t_late = params["startup_t_start"] + 10.0 * params["startup_t_flow"]
+    _, _, mdot_h, mdot_c = transient.boundary_conditions(t_late, params, "startup")
+    assert (mdot_h, mdot_c) == (pytest.approx(params["mdot_h"]), pytest.approx(params["mdot_c"]))
 
     t_late = params["trip_t_start"] + 50.0 * params["trip_tau_v"]
     _, _, _, mdot_c = transient.boundary_conditions(t_late, params, "cold_trip")

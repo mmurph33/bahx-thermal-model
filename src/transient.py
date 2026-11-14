@@ -414,6 +414,15 @@ def boundary_conditions(t, params, scenario):
       T_h,in(t) = T_h_in + ramp_dT * psi((t - ramp_t_start)/ramp_t)
     "cold_trip" (Eq 38), for t >= trip_t_start:
       mdot_c(t) = mdot_c [phi + (1 - phi) exp(-(t - trip_t_start)/tau_v)]
+    "both_ramp": the Eq 37 ramp applied to both inlets at the same time,
+      T_h,in(t) = T_h_in + ramp_dT   * psi((t - ramp_t_start)/ramp_t)
+      T_c,in(t) = T_c_in + ramp_dT_c * psi((t - ramp_t_start)/ramp_t)
+      (not in the math doc yet, flagged: add it to Section 6.5).
+    "startup": both flows open from zero along the same smoothed ramp,
+      mdot(t) = mdot * psi((t - startup_t_start)/startup_t_flow),
+      with the inlet temperatures held at T_h_in and T_c_in. Start it from a
+      uniform core (simulate's default y0 for this scenario). Not in the math
+      doc yet (flagged).
     "none": everything constant (used for steady holds and tests).
 
     Parameters
@@ -421,9 +430,10 @@ def boundary_conditions(t, params, scenario):
     t : float or ndarray, shape (n_t,)
         Time [s].
     params : dict
-        Uses T_h_in, T_c_in, mdot_h, mdot_c and the ramp_* / trip_* keys.
+        Uses T_h_in, T_c_in, mdot_h, mdot_c and the ramp_* / trip_* /
+        startup_* keys.
     scenario : str
-        "none", "feed_ramp" or "cold_trip".
+        "none", "feed_ramp", "cold_trip", "both_ramp" or "startup".
 
     Returns
     -------
@@ -488,10 +498,23 @@ def boundary_conditions(t, params, scenario):
             ),
             mdot_c
         )
+    elif scenario == "both_ramp":
+        # Both inlets follow the same smoothed ramp: hot by ramp_dT, cold by ramp_dT_c.
+        s = (t - params["ramp_t_start"]) / params["ramp_t"]
+        psi = smooth_ramp(s, params["ramp_sharpness"])
+        T_h_in = T_h_in + params["ramp_dT"] * psi
+        T_c_in = T_c_in + params["ramp_dT_c"] * psi
+    elif scenario == "startup":
+        # Both flows open together from zero; the inlet temperatures do not change.
+        # (At zero flow the correlations fall back to the laminar h, so this is safe.)
+        s = (t - params["startup_t_start"]) / params["startup_t_flow"]
+        psi = smooth_ramp(s, params["ramp_sharpness"])
+        mdot_h = mdot_h * psi
+        mdot_c = mdot_c * psi
     else:
         raise ValueError(
             f"Unknown scenario '{scenario}'. "
-            "Choose 'none', 'feed_ramp', or 'cold_trip'."
+            "Choose 'none', 'feed_ramp', 'cold_trip', 'both_ramp' or 'startup'."
         )
 
     return T_h_in, T_c_in, mdot_h, mdot_c
@@ -899,7 +922,7 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
         Surrogates built for this scenario (properties.build_surrogates(params,
         scenario)), so the ramped inlet stays inside the fitted range.
     scenario : str
-        "none", "feed_ramp" or "cold_trip".
+        "none", "feed_ramp", "cold_trip", "both_ramp" or "startup".
     t_end : float
         Final time [s].
     t_eval : ndarray, shape (n_t,), optional
@@ -907,7 +930,8 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
         enough to resolve the upset (e.g. 2001 points).
     y0 : ndarray, optional
         Initial state, shape (3N,) (full) or (N,) (quasi_steady). Default:
-        discrete_steady_state(params, props, scenario); for quasi_steady,
+        discrete_steady_state(params, props, scenario), or for "startup" a
+        uniform core at startup_T0 (there is no flow yet); for quasi_steady,
         its wall part polished to the quasi-steady model's own steady state.
     model : str, optional
         "full" or "quasi_steady".
@@ -976,6 +1000,14 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
         jac_sparsity = None  # the gas sweeps make this Jacobian dense
 
     # Initial state: the steady state of the discrete model being integrated.
+    # A startup begins from rest instead: no flow yet, so the gas and the metal
+    # all sit at the uniform idle temperature startup_T0.
+    if y0 is None and scenario == "startup":
+        T_0 = np.full(N, float(params["startup_T0"]))
+        if model == "full":
+            y0 = pack_state(T_0, T_0, T_0)
+        else:
+            y0 = T_0
     if y0 is None:
         y_full = discrete_steady_state(params, props, scenario)
         if model == "full":
@@ -987,11 +1019,13 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
             _, _, T_w_full = unpack_state(y_full)
             y0 = root(lambda T_w: rhs(0.0, T_w), T_w_full, method="hybr").x
 
-    # Feed ramp: nothing happens before it starts, so BDF would grow its step
-    # and could jump straight over a short ramp.
+    # Feed ramp (and both_ramp): nothing happens before it starts, so BDF would
+    # grow its step and could jump straight over a short ramp.
     max_step = np.inf
-    if scenario == "feed_ramp":
+    if scenario in ("feed_ramp", "both_ramp"):
         max_step = params["ramp_t"] / 20.0
+    if scenario == "startup":
+        max_step = params["startup_t_flow"] / 20.0
 
     # Cold trip: Eq 38 has a slope jump at trip_t_start, so integrate up to it
     # and restart from there; BDF never steps across the kink.

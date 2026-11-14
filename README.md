@@ -27,9 +27,10 @@ bahx-thermal-model/
 │   ├── correlations.py   fin geometry, Manglik-Bergles j, fin/surface efficiency, side conductances
 │   ├── steady.py         analytical ε-NTU solution, steady BVP (collocation + shooting), duty and energy closure
 │   ├── transient.py      method-of-lines transient, upset scenarios, discrete steady state, quasi-steady fallback
-│   └── metrics.py        thermal-fatigue and ALPEMA metrics, grid-convergence order, smooth max, thermal stress
+│   ├── metrics.py        thermal-fatigue and ALPEMA metrics, grid-convergence order, smooth max, thermal stress
+│   └── stress.py         thermal stress check: ALPEMA difference limits and fully restrained stress (Eq 53)
 ├── tests/                pytest verification checks (see CLAUDE.md "Verification")
-├── scripts/              runnable scripts that solve the model and save figures (run_steady.py, plot_heatmap.py)
+├── scripts/              runnable scripts that solve the model and save figures (run_steady.py, plot_heatmap.py, plot_transient.py)
 ├── notebooks/            analysis notebooks; import from src/ and only make plots
 ├── figures/              saved figures from notebooks and scripts
 ├── data/                 small input data (e.g. NIST WebBook spot-check values)
@@ -76,6 +77,7 @@ Run from the repo root (figures are saved to `figures/`):
 ```bash
 python -m scripts.run_steady     # base-case steady solution: prints duty and closure, saves steady_profiles.png
 python -m scripts.plot_heatmap   # same solution drawn as a temperature map, saves steady_heatmap.png
+python -m scripts.plot_transient # startup from rest: animated temperature profiles, saves startup.gif and startup_snapshots.png
 ```
 
 ### Notebooks
