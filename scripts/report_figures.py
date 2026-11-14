@@ -342,7 +342,7 @@ def fig_surrogates(params, props_ramp, fig_dir):
     plt.show()
 
 
-def steady_verification(params, fig_dir):
+def steady_verification(params, fig_dir, fig_label="Figure 3"):
     """Figure 3 and its table: constant-property BVP solutions against the analytical solution.
 
     The same inputs as tests/test_steady.py: fixed mu, k and rho, and heat capacities and
@@ -388,7 +388,7 @@ def steady_verification(params, fig_dir):
         ax.set_xlabel("$x/L$")
     axes[0].set_ylabel(r"$\theta = (T - T_{c,in})/(T_{h,in} - T_{c,in})$")
     axes[1].legend(loc="lower left")
-    fig.suptitle("Figure 3. Constant-property BVP solution against the analytical solution",
+    fig.suptitle(f"{fig_label}. Constant-property BVP solution against the analytical solution",
                  x=0.01, ha="left", fontweight="bold")
     fig.tight_layout()
     fig.savefig(fig_dir / "report_steady_verification.png")
@@ -417,7 +417,7 @@ def steady_checks(params, props):
     return s
 
 
-def steady_base_case(s, params, props, limits, fig_dir):
+def steady_base_case(s, params, props, limits, fig_dir, fig_label="Figure 4"):
     """Figure 4 and the local heat transfer and exchanger tables for the steady base case."""
     duty = steady.energy_balance(s, params, props)
     geom = correlations.exchanger_geometry(params)
@@ -450,7 +450,7 @@ def steady_base_case(s, params, props, limits, fig_dir):
     ax_d.set_ylabel("temperature difference [K]")
     ax_d.set_title("(b) Local temperature differences")
     ax_d.legend(loc="upper left", bbox_to_anchor=(0.0, 0.83))
-    fig.suptitle("Figure 4. Steady base case", x=0.01, ha="left", fontweight="bold")
+    fig.suptitle(f"{fig_label}. Steady base case", x=0.01, ha="left", fontweight="bold")
     fig.tight_layout()
     fig.savefig(fig_dir / "report_steady_base_case.png")
     plt.show()
@@ -598,7 +598,7 @@ def fig_bvp_convergence(params, props, fig_dir):
 # Sections 3.7-3.10: feed ramp, ramp sweep, cold trip, quasi-steady model
 # ---------------------------------------------------------------------------
 
-def fig_feed_ramp(runs, histories, params, limits, grids, t_end, fig_dir):
+def fig_feed_ramp(runs, histories, params, limits, grids, t_end, fig_dir, fig_label="Figure 7"):
     """Figure 7 (feed-temperature ramp on the finest grid) and its grid-convergence table."""
     r, m = runs[grids[-1]], histories[grids[-1]]
     t_min = r["t"] / 60.0
@@ -651,7 +651,7 @@ def fig_feed_ramp(runs, histories, params, limits, grids, t_end, fig_dir):
     ax.set_ylabel("metal temperature change [K]")
     ax.set_title("(d) Metal temperature change along the core")
     ax.legend(loc="upper right")
-    fig.suptitle("Figure 7. Feed-temperature ramp, +10 K at 2 K/min", x=0.01, ha="left", fontweight="bold")
+    fig.suptitle(f"{fig_label}. Feed-temperature ramp, +10 K at 2 K/min", x=0.01, ha="left", fontweight="bold")
     fig.tight_layout()
     fig.savefig(fig_dir / "report_feed_ramp.png")
     plt.show()
@@ -798,10 +798,10 @@ def _upset_figure(runs, histories, params, limits, grids, t_show_min, title, fil
     ], grids)
 
 
-def fig_cold_trip(runs, histories, params, limits, grids, fig_dir):
+def fig_cold_trip(runs, histories, params, limits, grids, fig_dir, fig_label="Figure 9"):
     """Figure 9 (cold-stream trip, first 5 of 10 minutes) and its grid-convergence table."""
     _upset_figure(runs, histories, params, limits, grids, 5.0,
-                  "Figure 9. Cold-stream trip: 95 % loss of cold flow, hot flow unchanged (first 5 of 10 min)",
+                  f"{fig_label}. Cold-stream trip: 95 % loss of cold flow, hot flow unchanged (first 5 of 10 min)",
                   "report_cold_trip.png", fig_dir)
 
 
@@ -857,10 +857,10 @@ def quasi_steady_comparison(params, props, props_ramp, t_end_ramp, t_end_trip):
 # Sections 3.11-3.13: startup, thermal stress, ALPEMA summary
 # ---------------------------------------------------------------------------
 
-def fig_startup(runs, histories, params, limits, grids, fig_dir):
+def fig_startup(runs, histories, params, limits, grids, fig_dir, fig_label="Figure 10"):
     """Figure 10 (startup from rest, first 3 minutes) and its grid-convergence table."""
     _upset_figure(runs, histories, params, limits, grids, 3.0,
-                  f"Figure 10. Startup from rest: idle core at {params['startup_T0']:.0f} K, both flows open "
+                  f"{fig_label}. Startup from rest: idle core at {params['startup_T0']:.0f} K, both flows open "
                   f"over {params['startup_t_flow']:.0f} s (first 3 min)",
                   "report_startup.png", fig_dir, temps_legend="center right", diffs_legend="upper right")
 
