@@ -77,10 +77,8 @@ def test_transient_stays_at_steady_state(props_none):
     #    < 1e-4 K/min.
     drift = max(np.max(np.abs(r[field] - r[field][0])) for field in ("T_h", "T_c", "T_w"))
     assert drift < 1e-6
-    # Wall rate R_w = 60 max_i |dT_w,i/dt| [K/min] (Eq 39), written out here
-    # because metrics.wall_rate is not implemented yet; switch to
-    # np.max(metrics.wall_rate(r["dTw_dt"])) once it is.
-    assert 60.0 * np.max(np.abs(r["dTw_dt"])) < 1e-4
+    # Wall rate R_w = 60 max_i |dT_w,i/dt| [K/min] (Eq 39).
+    assert np.max(metrics.wall_rate(r["dTw_dt"])) < 1e-4
 
     # 6. (Diagnostic, no assert) The rates at transient.steady_to_cells(...)
     #    are largest in hot cell 1 and cold cell N. Print them to show why
@@ -167,8 +165,6 @@ def test_grid_convergence_of_transient_metric(record_property):
     for transient metrics. Upwinding smears fronts, so a coarse grid
     under-predicts peak rates; grid convergence is required, not optional.
     """
-    # Delete this line once metrics.wall_rate and metrics.observed_order exist.
-    pytest.skip("needs metrics.wall_rate and metrics.observed_order (metrics.py not implemented yet)")
     # 1. params = dict(config.BASE_CASE) with the base feed ramp,
     #    ivp_rtol = ivp_atol = 1e-8 (time error must be much smaller than
     #    space error, or p_obs measures the solver tolerance), and one fixed,
@@ -303,6 +299,29 @@ def test_startup_from_rest_reaches_the_base_steady_state():
 
     y_base = transient.discrete_steady_state(params, props, "none")
     assert np.max(np.abs(y_final - y_base)) < 1e-5
+
+
+def test_startup_runs_on_a_fine_grid():
+    """The startup from rest also runs with N = 400 over 10 minutes.
+
+    This case used to stop with "Temperature outside surrogate range" before
+    the first step: solve_ivp picks its first step from a trial state
+    y0 + h0 f(y0) with h0 as long as the whole run, which threw the cold inlet
+    cell far below T_c_in. simulate now gives an explicit small first step.
+    The finer grid must end at the same state as the base grid (both are at
+    steady state by then), to within the first-order grid error.
+    """
+    params = base_case_params()
+    props = properties.build_surrogates(params, "startup")
+    t_end = 600.0
+    t_eval = np.linspace(0.0, t_end, 61)
+    r_fine = transient.simulate(dict(params, N=400), props, "startup", t_end, t_eval=t_eval)
+    r_base = transient.simulate(dict(params, N=100), props, "startup", t_end, t_eval=t_eval)
+    assert np.all(r_fine["T_w"][0] == params["startup_T0"])
+    assert np.all(np.isfinite(r_fine["T_w"]))
+    # Outlet temperatures of the two grids at the end: same steady state, O(dx) apart.
+    assert r_fine["T_h"][-1, -1] == pytest.approx(r_base["T_h"][-1, -1], abs=0.5)
+    assert r_fine["T_c"][-1, 0] == pytest.approx(r_base["T_c"][-1, 0], abs=0.5)
 
 
 def test_boundary_conditions_scenarios():

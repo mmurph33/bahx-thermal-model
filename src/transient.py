@@ -965,6 +965,10 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
     #    - "feed_ramp": nothing happens before the ramp, so BDF grows its
     #      step and can jump straight over a short ramp. Set
     #      max_step <= ramp_t/20.
+    #    - "startup": max_step <= startup_t_flow/20 for the same reason, and
+    #      an explicit small first_step (startup_t_flow/1000), because
+    #      solve_ivp's automatic first-step trial extrapolates the cold inlet
+    #      cell outside the surrogate range on fine grids and long runs.
     # 6. If a solve fails, raise RuntimeError with sol.message.
     # 7. Histories: T_h, T_c, T_w = unpack_state(sol.y), each transposed to
     #    shape (n_t, N). For "quasi_steady", T_w = sol.y.T and T_h, T_c come
@@ -1022,10 +1026,20 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
     # Feed ramp (and both_ramp): nothing happens before it starts, so BDF would
     # grow its step and could jump straight over a short ramp.
     max_step = np.inf
+    first_step = None  # None lets solve_ivp choose its own first step
     if scenario in ("feed_ramp", "both_ramp"):
         max_step = params["ramp_t"] / 20.0
     if scenario == "startup":
         max_step = params["startup_t_flow"] / 20.0
+        # solve_ivp chooses its first step by evaluating the right-hand side
+        # at the trial state y0 + h0*f(y0), with h0 as large as the whole run.
+        # From rest only the cold inlet cell has a (small) rate, from the
+        # smoothed ramp's leftover flow at t = 0 (psi(0) ~ 1e-6). Multiplied by
+        # h0 = t_end, that pushes the cell far below T_c_in and outside the
+        # surrogate range (seen for N = 800 with t_end = 261 s and for N = 400
+        # with t_end = 600 s; the smaller the cell, the larger its rate).
+        # A small explicit first step skips that trial; BDF grows it from there.
+        first_step = min(params["startup_t_flow"] / 1000.0, t_end)
 
     # Cold trip: Eq 38 has a slope jump at trip_t_start, so integrate up to it
     # and restart from there; BDF never steps across the kink.
@@ -1057,6 +1071,7 @@ def simulate(params, props, scenario, t_end, t_eval=None, y0=None, model="full")
             dense_output=True,
             jac_sparsity=jac_sparsity,
             max_step=max_step,
+            first_step=first_step,
         )
         if not sol.success:
             raise RuntimeError(f"Transient solve failed on [{t_a}, {t_b}] s: {sol.message}")
