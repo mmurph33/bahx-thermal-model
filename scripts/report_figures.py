@@ -6,22 +6,32 @@ cell is a call or two. Everything here is post-processing and plotting: the
 model itself is in src/.
 
 Each figure function shows the figure, saves it to figures/ and returns
-nothing unless stated. Each table function displays a markdown table.
+nothing unless stated. Each table function displays a markdown table (in a
+notebook) or prints it as text (in a plain Python run).
+
+Every number in a title, label or table comes from params (config.BASE_CASE)
+or limits (config.ALPEMA_LIMITS), so the figures stay right if the base case
+changes. The ALPEMA metrics, the grid-convergence order and the thermal stress
+come from src/metrics.py and src/stress.py, not from copies written here.
 
 Use from the notebook (after the setup cell puts the repo root on sys.path):
     from scripts import report_figures as rf
     rf.set_style()
+or regenerate every report figure and table from the repo root:
+    python -m scripts.make_report_figures
 """
 
 import contextlib
 import io
 import time
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
+from IPython import get_ipython
 from IPython.display import Image, Markdown, display
 
-from src import config, correlations, properties, steady, stress, transient
+from src import config, correlations, metrics, properties, steady, stress, transient
 
 # Each physical quantity keeps one color throughout the report: cold stream blue,
 # hot stream orange, metal wall aqua. Grid levels N, 2N, 4N use light-to-dark blue,
@@ -44,6 +54,16 @@ def set_style():
     })
 
 
+def use_file_backend():
+    """Draw to files only, for plain Python runs (python -m scripts.<name>).
+
+    Inputs: none. Output: none. The figure functions end with plt.show() so that a notebook
+    displays them; with this backend plt.show() opens no window and the run does not stop.
+    """
+    plt.switch_backend("Agg")
+    warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -52,12 +72,19 @@ def markdown_table(header, rows):
     """Display a table.
 
     Inputs: header, list of column titles (str); rows, list of lists of cell strings.
-    Output: none (displays the table; first column left-aligned, the rest right-aligned).
+    Output: none (displays the table in a notebook, prints its markdown text otherwise; first
+    column left-aligned, the rest right-aligned).
     """
     lines = ["| " + " | ".join(header) + " |",
              "|" + "|".join([":--"] + ["--:"] * (len(header) - 1)) + "|"]
     lines += ["| " + " | ".join(row) + " |" for row in rows]
-    display(Markdown("\n".join(lines)))
+    text = "\n".join(lines)
+    if get_ipython() is None:
+        # Plain Python (python -m scripts.make_report_figures): print the markdown text, with a
+        # blank line on each side so it still renders as a table after other printed lines.
+        print("\n" + text + "\n")
+    else:
+        display(Markdown(text))
 
 
 def draw_limit(ax, value, label):
@@ -84,42 +111,38 @@ def alpema_histories(r):
     """ALPEMA comparison quantities versus time for a full-model transient result (math doc Eq 39-40).
 
     Input: r, result dict from transient.simulate(..., model="full").
-    Output: dict of arrays, each shape (n_t,):
+    Output: the dict from metrics.alpema_metrics. The entries used here, each shape (n_t,):
         "R_w"          wall heating rate, max over cells of |dT_w/dt| [K/min]
         "R_end"        outlet-nozzle rate, max(|dT_h/dt| in cell N, |dT_c/dt| in cell 1) [K/min]
-        "dT_ss"        stream-to-stream difference, max over cells of |T_h - T_c| [K]
-        "dT_sm"        stream-to-metal difference, max over cells of |T_h - T_w| and |T_w - T_c| [K]
+        "dT_ss"        stream-to-stream difference, largest over the cells and the two end faces [K]
+        "dT_sm"        stream-to-metal difference, largest over the cells and the two end faces [K]
+        "dT_ss_cells", "dT_sm_cells"  the same two over the cells only (they depend on the grid) [K]
         "dT_cold_end"  stream-to-stream difference at the cold-end nozzles, T_h,out - T_c,in [K]
         "dT_warm_end"  stream-to-stream difference at the warm-end nozzles, T_h,in - T_c,out [K]
+    plus the scalar "max_dT_hour_wall", the largest metal temperature change in any 60 min [K].
     The rates come from the model right-hand side at the saved times (r["dTw_dt"] etc.),
     never from differencing the solution. A rate of 1 K/min equals 1 degC/min.
     """
-    hot_out, cold_out = r["T_h"][:, -1], r["T_c"][:, 0]  # hot leaves cell N, cold leaves cell 1
-    return {
-        "R_w": 60.0 * np.max(np.abs(r["dTw_dt"]), axis=1),
-        "R_end": 60.0 * np.maximum(np.abs(r["dTh_dt"][:, -1]), np.abs(r["dTc_dt"][:, 0])),
-        "dT_ss": np.max(np.abs(r["T_h"] - r["T_c"]), axis=1),
-        "dT_sm": np.max(np.maximum(np.abs(r["T_h"] - r["T_w"]), np.abs(r["T_w"] - r["T_c"])), axis=1),
-        "dT_cold_end": hot_out - r["T_c_in"],
-        "dT_warm_end": r["T_h_in"] - cold_out,
-    }
+    return metrics.alpema_metrics(r, window=config.ALPEMA_LIMITS["hour_window"])
 
 
 def observed_order(y_N, y_2N, y_4N):
     """Observed order of grid convergence and Richardson-extrapolated value (math doc Eq 35).
 
     Inputs: y_N, y_2N, y_4N, one output on grids of N, 2N and 4N cells (floats).
-    Outputs: p_obs [-] and y_star (units of y). Both are nan if the three values do not
-    converge monotonically; p_obs is nan and y_star = y_4N if y_2N and y_4N already agree
-    to round-off.
+    Outputs: p_obs [-] and y_star (units of y), from metrics.observed_order. Both are nan if
+    the three values do not converge monotonically; p_obs is nan and y_star = y_4N if y_2N
+    and y_4N already agree to round-off. (The tables show "n/a" for nan.)
     """
-    d1, d2 = y_N - y_2N, y_2N - y_4N
-    if abs(d2) < 1e-9 * max(abs(y_4N), 1.0):
+    if abs(y_2N - y_4N) < 1e-9 * max(abs(y_4N), 1.0):
         return np.nan, y_4N
-    if d1 * d2 <= 0.0:
+    with warnings.catch_warnings():
+        # metrics.observed_order warns for non-monotone values; the tables report them as n/a.
+        warnings.simplefilter("ignore")
+        p_obs, y_star = metrics.observed_order(y_N, y_2N, y_4N)
+    if np.isnan(p_obs):
         return np.nan, np.nan
-    p_obs = np.log(abs(d1) / abs(d2)) / np.log(2.0)
-    return p_obs, y_4N + (y_4N - y_2N) / (2.0 ** p_obs - 1.0)
+    return p_obs, y_star
 
 
 def extrapolated(values):
@@ -164,7 +187,7 @@ def run_grids(params, props, scenario, t_end, t_eval, grids):
 # Section 2: methods figure
 # ---------------------------------------------------------------------------
 
-def fig_fv_grid(fig_dir):
+def fig_fv_grid(fig_dir, fig_label="Figure 1"):
     """Figure 1: one repeating unit (hot passage, metal, cold passage) divided into finite-volume cells."""
     fig, ax = plt.subplots(figsize=(10, 3.9))
     n_cells, i = 7, 3                                   # draw 7 cells and detail cell i (the 4th)
@@ -224,7 +247,7 @@ def fig_fv_grid(fig_dir):
     ax.set_ylim(0.3, 4.45)
     ax.set_aspect("equal")
     ax.axis("off")
-    ax.set_title("Figure 1. Repeating unit split into N finite-volume cells (hot flows +x, cold flows -x)")
+    ax.set_title(f"{fig_label}. Repeating unit split into N finite-volume cells (hot flows +x, cold flows -x)")
     fig.savefig(fig_dir / "report_fv_grid.png")
     plt.show()
 
@@ -284,7 +307,8 @@ def surrogate_tables(params, props, props_ramp):
     """
     rows = []
     for label, pr in (("steady, trip and startup", props), ("feed ramp", props_ramp)):
-        for side, stream_name in (("h", "hot, 6 MPa"), ("c", "cold, 1.5 MPa")):
+        for side, stream_name in (("h", f"hot, {params['p_h'] / 1e6:g} MPa"),
+                                  ("c", f"cold, {params['p_c'] / 1e6:g} MPa")):
             err = pr[side]["max_rel_err"]
             rows.append([f"{stream_name}, {label}", f"{pr[side]['T_lo']:.0f}-{pr[side]['T_hi']:.0f} K",
                          *(f"{err[name]:.1e}" for name in ("cp", "mu", "k", "rho", "hhat"))])
@@ -302,7 +326,7 @@ def surrogate_tables(params, props, props_ramp):
     markdown_table(["Stream", "Nearest hazard", "Margin below fit range", "max/min $c_p$ over range"], rows)
 
 
-def fig_surrogates(params, props_ramp, fig_dir):
+def fig_surrogates(params, props_ramp, fig_dir, fig_label="Figure 2"):
     """Figure 2: CoolProp heat capacity along both isobars, the fit window, and the surrogate error."""
     T_wide = np.linspace(165.0, 330.0, 400)
     cp_hot = properties.coolprop_table(params["fluid"], params["p_h"], T_wide)["cp"]
@@ -312,8 +336,8 @@ def fig_surrogates(params, props_ramp, fig_dir):
     T_lo, T_hi = props_ramp["h"]["T_lo"], props_ramp["h"]["T_hi"]
     ax_cp.axvspan(T_lo, T_hi, color="#f0efec", zorder=0)
     ax_cp.text((T_lo + T_hi) / 2, 17.5, "fit range", ha="center", fontsize=8, color=INK_2)
-    ax_cp.plot(T_wide, cp_hot / 1e3, color=COLORS["hot"], label="hot side, 6 MPa")
-    ax_cp.plot(T_wide, cp_cold / 1e3, color=COLORS["cold"], label="cold side, 1.5 MPa")
+    ax_cp.plot(T_wide, cp_hot / 1e3, color=COLORS["hot"], label=f"hot side, {params['p_h'] / 1e6:g} MPa")
+    ax_cp.plot(T_wide, cp_cold / 1e3, color=COLORS["cold"], label=f"cold side, {params['p_c'] / 1e6:g} MPa")
     i_peak = np.argmax(cp_hot)
     ax_cp.annotate(f"pseudo-critical peak\n{T_wide[i_peak]:.0f} K", (T_wide[i_peak], cp_hot[i_peak] / 1e3),
                    xytext=(12, -8), textcoords="offset points", fontsize=8, va="top")
@@ -330,13 +354,13 @@ def fig_surrogates(params, props_ramp, fig_dir):
         rel_err = np.abs(properties.evaluate(surr, "cp", T_check) - cp_ref) / cp_ref
         ax_err.semilogy(T_check, rel_err, color=COLORS["hot" if side == "h" else "cold"], linewidth=1.2,
                         label=stream_name)
-    draw_limit(ax_err, params["fit_max_rel_err"], "acceptance limit $10^{-3}$")
+    draw_limit(ax_err, params["fit_max_rel_err"], f"acceptance limit {params['fit_max_rel_err']:g}")
     ax_err.set_ylim(1e-10, 1e-2)
     ax_err.set_xlabel("T [K]")
     ax_err.set_ylabel("relative error of $c_p$ surrogate")
     ax_err.set_title(f"(b) Surrogate error over the fit range (degree {params['fit_degree']})")
     ax_err.legend(loc="lower right")
-    fig.suptitle("Figure 2. Property surrogates", x=0.01, ha="left", fontweight="bold")
+    fig.suptitle(f"{fig_label}. Property surrogates", x=0.01, ha="left", fontweight="bold")
     fig.tight_layout()
     fig.savefig(fig_dir / "report_surrogates.png")
     plt.show()
@@ -434,8 +458,9 @@ def steady_base_case(s, params, props, limits, fig_dir, fig_label="Figure 4"):
         # Labels sit outside the two ends of the core so they never cross a curve.
         ax_T.annotate(f"{text} {Ti:.1f} K", (x[xi], Ti), xytext=(-7 if xi == 0 else 7, 0),
                       textcoords="offset points", ha="right" if xi == 0 else "left", va="center", fontsize=8)
-    ax_T.set_xlim(-0.24, 0.94)
-    ax_T.set_xticks(np.arange(0.0, 0.71, 0.1))
+    L = params["L"]
+    ax_T.set_xlim(-0.34 * L, 1.34 * L)             # room for the inlet and outlet labels beside the core
+    ax_T.set_xticks(np.linspace(0.0, L, 8))
     ax_T.set_xlabel("x [m]")
     ax_T.set_ylabel("T [K]")
     ax_T.set_title("(a) Temperature profiles")
@@ -444,8 +469,8 @@ def steady_base_case(s, params, props, limits, fig_dir, fig_label="Figure 4"):
     ax_d.plot(x, T_h - T_c, color=INK, label="stream to stream $T_h - T_c$")
     ax_d.plot(x, T_h - T_w, color=COLORS["hot"], label="hot gas to metal $T_h - T_w$")
     ax_d.plot(x, T_w - T_c, color=COLORS["cold"], label="metal to cold gas $T_w - T_c$")
-    draw_limit(ax_d, limits["dT_stream_stream"], "ALPEMA limit, about 30 °C")
-    ax_d.set_ylim(0, 35)
+    draw_limit(ax_d, limits["dT_stream_stream"], f"ALPEMA limit, about {limits['dT_stream_stream']:g} °C")
+    ax_d.set_ylim(0, limits["dT_stream_stream"] + 5.0)
     ax_d.set_xlabel("x [m]")
     ax_d.set_ylabel("temperature difference [K]")
     ax_d.set_title("(b) Local temperature differences")
@@ -502,7 +527,7 @@ def steady_base_case(s, params, props, limits, fig_dir, fig_label="Figure 4"):
 # Sections 3.5-3.6: time scales, Jacobian, transient verification
 # ---------------------------------------------------------------------------
 
-def time_scales_and_jacobian(params, props, fig_dir):
+def time_scales_and_jacobian(params, props, fig_dir, fig_label="Figure 5"):
     """Time-scale tables and Figure 5 (Jacobian sparsity). Output: scales, from transient.time_scales."""
     scales = transient.time_scales(params, props)
     markdown_table(["Time scale", "Hot side", "Cold side"], [
@@ -528,7 +553,7 @@ def time_scales_and_jacobian(params, props, fig_dir):
         ax.set_title(f"axial conduction {'on' if conduction else 'off'}: {pattern.sum()} nonzeros")
         ax.set_xlabel("state $[T_{h,1}, T_{c,1}, T_{w,1}, T_{h,2}, \\dots]$")
     axes[0].set_ylabel("equation")
-    fig.suptitle(f"Figure 5. Jacobian sparsity pattern for N = {N_demo} cells (3N = {3 * N_demo} states)",
+    fig.suptitle(f"{fig_label}. Jacobian sparsity pattern for N = {N_demo} cells (3N = {3 * N_demo} states)",
                  x=0.01, ha="left", fontweight="bold")
     fig.tight_layout()
     fig.savefig(fig_dir / "report_jacobian_sparsity.png")
@@ -569,7 +594,7 @@ def transient_checks(params, props, props_ramp, s, scales):
     ])
 
 
-def fig_bvp_convergence(params, props, fig_dir):
+def fig_bvp_convergence(params, props, fig_dir, fig_label="Figure 6"):
     """Figure 6: the discrete steady state converges to the BVP solution as the grid is refined."""
     s_fine = steady.solve_steady(dict(params, bvp_tol=1e-8), props)
     N_list = [25, 50, 100, 200, 400]
@@ -586,7 +611,7 @@ def fig_bvp_convergence(params, props, fig_dir):
     ax.minorticks_off()
     ax.set_xlabel("number of cells N")
     ax.set_ylabel(r"max $|y_{ss,N} - y_{BVP}|$ [K]")
-    ax.set_title("Figure 6. Discrete steady state converges to the BVP", loc="left")
+    ax.set_title(f"{fig_label}. Discrete steady state converges to the BVP", loc="left")
     ax.legend()
     fig.tight_layout()
     fig.savefig(fig_dir / "report_transient_verification.png")
@@ -623,18 +648,18 @@ def fig_feed_ramp(runs, histories, params, limits, grids, t_end, fig_dir, fig_la
     ax.plot(t_min, R_in, color=COLORS["hot"], label="hot inlet nozzle (imposed)")
     ax.plot(t_min, m["R_w"], color=COLORS["wall"], label="metal, $R_w$")
     ax.plot(t_min, m["R_end"], color=COLORS["cold"], label="outlet nozzles, $R_{end}$")
-    draw_limit(ax, limits["rate_frequent"], "frequent events, 1 °C/min")
-    draw_limit(ax, limits["rate_infrequent"], "startup/trip, 5 °C/min")
-    ax.set_ylim(0, 6)
+    draw_limit(ax, limits["rate_frequent"], f"frequent events, {limits['rate_frequent']:g} °C/min")
+    draw_limit(ax, limits["rate_infrequent"], f"startup/trip, {limits['rate_infrequent']:g} °C/min")
+    ax.set_ylim(0, limits["rate_infrequent"] + 1.0)
     ax.set_ylabel("rate of change [K/min]")
     ax.set_title("(b) Rates of change")
     ax.legend(loc="center left")
 
     ax = axes[1, 0]
-    ax.plot(t_min, m["dT_ss"], color=INK, label="stream to stream, max over cells")
-    ax.plot(t_min, m["dT_sm"], color=COLORS["wall"], label="stream to metal, max over cells")
-    draw_limit(ax, limits["dT_stream_stream"], "about 30 °C")
-    ax.set_ylim(0, 35)
+    ax.plot(t_min, m["dT_ss"], color=INK, label="stream to stream, largest along the core")
+    ax.plot(t_min, m["dT_sm"], color=COLORS["wall"], label="stream to metal, largest along the core")
+    draw_limit(ax, limits["dT_stream_stream"], f"about {limits['dT_stream_stream']:g} °C")
+    ax.set_ylim(0, limits["dT_stream_stream"] + 5.0)
     ax.set_xlabel("t [min]")
     ax.set_ylabel("temperature difference [K]")
     ax.set_title("(c) Temperature differences")
@@ -651,7 +676,8 @@ def fig_feed_ramp(runs, histories, params, limits, grids, t_end, fig_dir, fig_la
     ax.set_ylabel("metal temperature change [K]")
     ax.set_title("(d) Metal temperature change along the core")
     ax.legend(loc="upper right")
-    fig.suptitle(f"{fig_label}. Feed-temperature ramp, +10 K at 2 K/min", x=0.01, ha="left", fontweight="bold")
+    fig.suptitle(f"{fig_label}. Feed-temperature ramp, {params['ramp_dT']:+g} K at "
+                 f"{60.0 * abs(params['ramp_dT']) / params['ramp_t']:g} K/min", x=0.01, ha="left", fontweight="bold")
     fig.tight_layout()
     fig.savefig(fig_dir / "report_feed_ramp.png")
     plt.show()
@@ -666,13 +692,13 @@ def fig_feed_ramp(runs, histories, params, limits, grids, t_end, fig_dir, fig_la
     ], grids)
 
 
-def ramp_sweep(params, props_ramp, limits, grids, fig_dir):
-    """Figure 8 and its table: peak rates for a 10 K feed ramp at nominal rates from 0.5 to 300 K/min."""
+def ramp_sweep(params, props_ramp, limits, grids, fig_dir, fig_label="Figure 8"):
+    """Figure 8 and its table: peak rates for the base feed ramp size at nominal rates from 0.5 to 300 K/min."""
     sweep_rates = np.array([0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0, 300.0])  # nominal feed ramp rates [K/min]
     sweep = {N: {"R_w": [], "R_end": []} for N in grids}
     start = time.perf_counter()
     for rate in sweep_rates:
-        ramp_t = params["ramp_dT"] / (rate / 60.0)                      # duration of the 10 K ramp [s]
+        ramp_t = params["ramp_dT"] / (rate / 60.0)                      # duration of the ramp [s]
         # Start the ramp several corner widths after t = 0 so that the initial state is steady.
         t_start = max(params["ramp_t_start"], 6.0 * ramp_t / params["ramp_sharpness"])
         t_end = t_start + ramp_t + 120.0
@@ -693,8 +719,8 @@ def ramp_sweep(params, props_ramp, limits, grids, fig_dir):
     ax_r.loglog(sweep_rates, sweep_rates, color=COLORS["hot"], label="hot inlet nozzle (= ramp rate)")
     ax_r.loglog(sweep_rates, R_w_fine, "o-", color=COLORS["wall"], label="metal, peak $R_w$")
     ax_r.loglog(sweep_rates, R_end_fine, "o-", color=COLORS["cold"], label="outlet nozzles, peak $R_{end}$")
-    draw_limit(ax_r, limits["rate_frequent"], "frequent events, 1 °C/min")
-    draw_limit(ax_r, limits["rate_infrequent"], "startup/trip, 5 °C/min")
+    draw_limit(ax_r, limits["rate_frequent"], f"frequent events, {limits['rate_frequent']:g} °C/min")
+    draw_limit(ax_r, limits["rate_infrequent"], f"startup/trip, {limits['rate_infrequent']:g} °C/min")
     ax_r.set_xlabel("nominal feed ramp rate r [K/min]")
     ax_r.set_ylabel("peak rate of change [K/min]")
     ax_r.set_title("(a) Peak rates")
@@ -707,7 +733,8 @@ def ramp_sweep(params, props_ramp, limits, grids, fig_dir):
     ax_ratio.set_ylabel("peak rate / ramp rate")
     ax_ratio.set_title("(b) Attenuation by the metal")
     ax_ratio.legend(loc="lower left")
-    fig.suptitle(f"Figure 8. Peak rates for a 10 K feed ramp at different rates (N = {grids[-1]})",
+    fig.suptitle(f"{fig_label}. Peak rates for a {params['ramp_dT']:g} K feed ramp at different rates "
+                 f"(N = {grids[-1]})",
                  x=0.01, ha="left", fontweight="bold")
     fig.tight_layout()
     fig.savefig(fig_dir / "report_ramp_sweep.png")
@@ -730,7 +757,9 @@ def _upset_figure(runs, histories, params, limits, grids, t_show_min, title, fil
     """Four-panel figure for an upset that changes the flows (cold trip, startup), on the finest grid.
 
     Panels: (a) mass flows, (b) outlet and end-of-core metal temperatures, (c) rates of change,
-    (d) stream-to-stream differences at the nozzles and over the cells on every grid.
+    (d) stream-to-stream differences at the nozzles and over the cells on every grid. Panel (d)
+    shows why the ALPEMA and stress checks use the end faces: the cells-only maximum creeps
+    toward the cold-end nozzle difference as the grid is refined.
     Inputs: runs and histories keyed by N, params, limits, grids, t_show_min (end of the plotted
     window [min]), title (figure title), filename (saved in fig_dir), temps_legend and
     diffs_legend (legend positions in panels b and d).
@@ -762,7 +791,7 @@ def _upset_figure(runs, histories, params, limits, grids, t_show_min, title, fil
     ax = axes[1, 0]
     ax.plot(t_min, m["R_w"], color=COLORS["wall"], label="metal, $R_w$")
     ax.plot(t_min, m["R_end"], color=COLORS["cold"], label="outlet nozzles, $R_{end}$")
-    draw_limit(ax, limits["rate_infrequent"], "startup/trip, 5 °C/min")
+    draw_limit(ax, limits["rate_infrequent"], f"startup/trip, {limits['rate_infrequent']:g} °C/min")
     ax.set_xlabel("t [min]")
     ax.set_ylabel("rate of change [K/min]")
     ax.set_title("(c) Rates of change")
@@ -772,9 +801,9 @@ def _upset_figure(runs, histories, params, limits, grids, t_show_min, title, fil
     ax.plot(t_min, m["dT_cold_end"], color=INK, label="cold-end nozzles, $T_{h,out} - T_{c,in}$")
     ax.plot(t_min, m["dT_warm_end"], color=INK_2, linewidth=1.0, label="warm-end nozzles, $T_{h,in} - T_{c,out}$")
     for N, shade in zip(grids, GRID_SHADES):
-        ax.plot(runs[N]["t"] / 60.0, histories[N]["dT_ss"], color=shade, linewidth=1.2,
+        ax.plot(runs[N]["t"] / 60.0, histories[N]["dT_ss_cells"], color=shade, linewidth=1.2,
                 label=f"max over cells, N = {N}")
-    draw_limit(ax, limits["dT_stream_stream"], "about 30 °C")
+    draw_limit(ax, limits["dT_stream_stream"], f"about {limits['dT_stream_stream']:g} °C")
     ax.set_ylim(0, 70)
     ax.set_xlabel("t [min]")
     ax.set_ylabel("stream-to-stream difference [K]")
@@ -791,17 +820,23 @@ def _upset_figure(runs, histories, params, limits, grids, t_show_min, title, fil
         ("peak metal rate $R_w$", "K/min", [histories[N]["R_w"].max() for N in grids]),
         ("peak outlet-nozzle rate $R_{end}$", "K/min", [histories[N]["R_end"].max() for N in grids]),
         ("max cold-end nozzle difference", "K", [histories[N]["dT_cold_end"].max() for N in grids]),
-        ("max stream-to-stream difference over cells", "K", [histories[N]["dT_ss"].max() for N in grids]),
-        ("max stream-to-metal difference over cells", "K", [histories[N]["dT_sm"].max() for N in grids]),
+        ("max stream-to-metal difference, cells and end faces", "K", [histories[N]["dT_sm"].max() for N in grids]),
+        ("max stream-to-stream difference over cells only", "K",
+         [histories[N]["dT_ss_cells"].max() for N in grids]),
+        ("max stream-to-metal difference over cells only", "K",
+         [histories[N]["dT_sm_cells"].max() for N in grids]),
         ("total metal temperature change", "K",
          [np.max(np.abs(runs[N]["T_w"] - runs[N]["T_w"][0])) for N in grids]),
     ], grids)
 
 
 def fig_cold_trip(runs, histories, params, limits, grids, fig_dir, fig_label="Figure 9"):
-    """Figure 9 (cold-stream trip, first 5 of 10 minutes) and its grid-convergence table."""
-    _upset_figure(runs, histories, params, limits, grids, 5.0,
-                  f"{fig_label}. Cold-stream trip: 95 % loss of cold flow, hot flow unchanged (first 5 of 10 min)",
+    """Figure 9 (cold-stream trip, first 5 minutes of the run) and its grid-convergence table."""
+    t_show_min = 5.0
+    t_run_min = runs[grids[-1]]["t"][-1] / 60.0
+    _upset_figure(runs, histories, params, limits, grids, t_show_min,
+                  f"{fig_label}. Cold-stream trip: {100.0 * (1.0 - params['trip_phi']):.0f} % loss of cold flow, "
+                  f"hot flow unchanged (first {t_show_min:g} of {t_run_min:g} min)",
                   "report_cold_trip.png", fig_dir)
 
 
@@ -828,7 +863,8 @@ def trip_entrance_length(params, props, grids):
         ["Entrance length $\\dot m_c c_{p,c} / a_c$",
          f"{1e3 * params['mdot_c'] * cp_c / a_c_base:.0f} mm", f"{1e3 * mdot_trip * cp_c / a_c_trip:.0f} mm"],
     ])
-    print(f"Cell width: {', '.join(f'{1e3 * params['L'] / N:.2f} mm (N = {N})' for N in grids)}")
+    cell_widths = ", ".join(f"{1e3 * params['L'] / N:.2f} mm (N = {N})" for N in grids)
+    print(f"Cell width: {cell_widths}")
     print(f"At the residual flow: Re = {float(Re_trip):.0f}, h from Manglik-Bergles = {float(h_mb):.0f} W/(m2 K), "
           f"laminar floor = {float(h_lam):.0f} W/(m2 K)")
 
@@ -879,10 +915,14 @@ def startup_animation(fig_dir):
 
 
 def _largest_differences(histories, grids):
-    """Largest stream-to-metal (extrapolated over the grids) and nozzle stream-to-stream differences [K]."""
+    """Largest stream-to-metal and stream-to-stream differences of a transient [K].
+
+    Inputs: histories keyed by N (alpema_histories), grids. Both differences include the two
+    end faces of the core (metrics.with_end_faces). The stream-to-metal value is extrapolated
+    over the grids; the stream-to-stream value is a nozzle difference, the same on every grid.
+    """
     dT_sm = extrapolated([histories[N]["dT_sm"].max() for N in grids])
-    m = histories[grids[-1]]
-    dT_ss = max(m["dT_cold_end"].max(), m["dT_warm_end"].max())   # grid independent
+    dT_ss = histories[grids[-1]]["dT_ss"].max()
     return dT_sm, dT_ss
 
 
@@ -890,23 +930,23 @@ def stress_table(s, scenarios, params, limits, grids):
     """Display the fully restrained thermal stress (report Section 2.9, src/stress.py) for each case.
 
     Inputs: s (steady result), scenarios (list of (name, histories keyed by N)), params, limits,
-    grids. The stream-to-metal difference is the largest over the cells (extrapolated over the
-    grids for transients); the stream-to-stream difference is the larger of the two nozzle
-    differences, which does not depend on the grid.
+    grids. Both differences are the largest along the core, end faces included; for transients
+    the stream-to-metal value is extrapolated over the grids. The largest stream-to-stream
+    difference is always between the two nozzles at one end of the core.
     """
     E, alpha_T, nu = params["E_m"], params["alpha_T"], params["nu_m"]
     MPa = 1e6
-    cases = [("Steady base case",
-              max(np.max(s["T_h"] - s["T_w"]), np.max(s["T_w"] - s["T_c"])),
-              max(s["T_h"][-1] - s["T_c"][-1], s["T_h"][0] - s["T_c"][0]))]
+    sigma_y = config.MATERIAL_LIMITS["sigma_y_3003_O"]
+    steady_check = stress.stress_check(s["x"], s["T_h"], s["T_c"], s["T_w"], params, limits, sigma_y)["check"]
+    cases = [("Steady base case", steady_check["stream-to-metal"]["value"],
+              steady_check["stream-to-stream"]["value"])]
     cases += [(name, *_largest_differences(h, grids)) for name, h in scenarios]
     rows = [[name, f"{dT_sm:.1f}", f"{stress.thermal_stress(dT_sm, E, alpha_T, nu) / MPa:.0f}",
              f"{dT_ss:.1f}", f"{stress.thermal_stress(dT_ss, E, alpha_T, nu) / MPa:.0f}"]
             for name, dT_sm, dT_ss in cases]
     markdown_table(["Case", "Largest stream-to-metal $\\Delta T$ [K]", "$\\sigma_{th}$ [MPa]",
-                    "Largest nozzle stream-to-stream $\\Delta T$ [K]", "$\\sigma_{th}$ [MPa]"], rows)
+                    "Largest stream-to-stream $\\Delta T$ [K]", "$\\sigma_{th}$ [MPa]"], rows)
     per_K = stress.thermal_stress(1.0, E, alpha_T, nu)
-    sigma_y = config.MATERIAL_LIMITS["sigma_y_3003_O"]
     markdown_table(["Reference level", "Temperature difference", "Stress"], [
         ["Fully restrained stress per kelvin", "1 K", f"{per_K / MPa:.2f} MPa"],
         ["ALPEMA difference limit", f"{limits['dT_stream_metal']:.0f} K",
@@ -920,42 +960,46 @@ def alpema_summary(s, ramp, trip, startup, params, limits, grids):
     """Display the ALPEMA checks for every case, using extrapolated values for grid-dependent outputs.
 
     Inputs: s (steady result); ramp, trip, startup, each (runs, histories) keyed by N; params,
-    limits, grids.
+    limits, grids. Temperature differences include the two end faces of the core.
     """
-    (ramp_runs, ramp_m), (trip_runs, trip_m), (start_runs, start_m) = ramp, trip, startup
+    (_, ramp_m), (_, trip_m), (_, start_m) = ramp, trip, startup
     T_h, T_c, T_w = s["T_h"], s["T_c"], s["T_w"]
     both = (limits["rate_frequent"], limits["rate_infrequent"])
-    ramp_rate = 60.0 * params["ramp_dT"] / params["ramp_t"]
+    ramp_rate = 60.0 * abs(params["ramp_dT"]) / params["ramp_t"]
+    ramp_name = f"Feed ramp, {ramp_rate:g} K/min"
 
-    def total_change(runs):
-        return np.max(np.abs(runs[grids[-1]]["T_w"] - runs[grids[-1]]["T_w"][0]))
+    def hourly(histories):
+        """Largest metal temperature change in any 60 min on the finest grid [K] (math doc Section 6.6)."""
+        return histories[grids[-1]]["max_dT_hour_wall"]
 
     def ext(histories, key):
+        """Peak of one history, extrapolated over the grids."""
         return extrapolated([histories[N][key].max() for N in grids])
 
     summary = [
         ("Steady base case", "max stream-to-stream difference", np.max(T_h - T_c), "K", limits["dT_stream_stream"]),
         ("Steady base case", "max stream-to-metal difference", max(np.max(T_h - T_w), np.max(T_w - T_c)), "K",
          limits["dT_stream_metal"]),
-        ("Feed ramp, 2 K/min", "rate at the hot inlet nozzle", ramp_rate, "K/min", both),
-        ("Feed ramp, 2 K/min", "peak metal rate $R_w$", ext(ramp_m, "R_w"), "K/min", both),
-        ("Feed ramp, 2 K/min", "peak outlet-nozzle rate $R_{end}$", ext(ramp_m, "R_end"), "K/min", both),
-        ("Feed ramp, 2 K/min", "max stream-to-stream difference", ext(ramp_m, "dT_ss"), "K", limits["dT_stream_stream"]),
-        ("Feed ramp, 2 K/min", "max stream-to-metal difference", ext(ramp_m, "dT_sm"), "K", limits["dT_stream_metal"]),
-        ("Feed ramp, 2 K/min", "metal change in any 60 min", total_change(ramp_runs), "K",
+        (ramp_name, "rate at the hot inlet nozzle", ramp_rate, "K/min", both),
+        (ramp_name, "peak metal rate $R_w$", ext(ramp_m, "R_w"), "K/min", both),
+        (ramp_name, "peak outlet-nozzle rate $R_{end}$", ext(ramp_m, "R_end"), "K/min", both),
+        (ramp_name, "max stream-to-stream difference", ext(ramp_m, "dT_ss"), "K", limits["dT_stream_stream"]),
+        (ramp_name, "max stream-to-metal difference", ext(ramp_m, "dT_sm"), "K", limits["dT_stream_metal"]),
+        (ramp_name, "metal change in any 60 min", hourly(ramp_m), "K",
          limits["change_per_hour_infrequent"]),
         ("Cold trip", "peak metal rate $R_w$", ext(trip_m, "R_w"), "K/min", limits["rate_infrequent"]),
         ("Cold trip", "peak outlet-nozzle rate $R_{end}$", ext(trip_m, "R_end"), "K/min", limits["rate_infrequent"]),
         ("Cold trip", "max cold-end nozzle difference", trip_m[grids[-1]]["dT_cold_end"].max(), "K",
          limits["dT_stream_stream"]),
-        ("Cold trip", "metal change in any 60 min", total_change(trip_runs), "K", limits["change_per_hour_infrequent"]),
+        ("Cold trip", "max stream-to-metal difference", ext(trip_m, "dT_sm"), "K", limits["dT_stream_metal"]),
+        ("Cold trip", "metal change in any 60 min", hourly(trip_m), "K", limits["change_per_hour_infrequent"]),
         ("Startup from rest", "peak metal rate $R_w$", ext(start_m, "R_w"), "K/min", limits["rate_infrequent"]),
         ("Startup from rest", "peak outlet-nozzle rate $R_{end}$", ext(start_m, "R_end"), "K/min",
          limits["rate_infrequent"]),
         ("Startup from rest", "max cold-end nozzle difference", start_m[grids[-1]]["dT_cold_end"].max(), "K",
          limits["dT_stream_stream"]),
         ("Startup from rest", "max stream-to-metal difference", ext(start_m, "dT_sm"), "K", limits["dT_stream_metal"]),
-        ("Startup from rest", "metal change in any 60 min", total_change(start_runs), "K",
+        ("Startup from rest", "metal change in any 60 min", hourly(start_m), "K",
          limits["change_per_hour_infrequent"]),
     ]
     rows = []
