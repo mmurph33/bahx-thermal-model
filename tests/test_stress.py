@@ -1,13 +1,18 @@
 """Unit tests for src/stress.py (thermal stress check against the ALPEMA limits).
 
-All tests use hand-made arrays, so no solver or CoolProp is needed and the
-results do not depend on the team's base-case choices.
+All tests but the last use hand-made arrays, so they need no solver or
+CoolProp and do not depend on the team's base-case choices. The last one runs
+the base-case cold trip on two grids to check that the transient stress check
+does not change its answer with the number of cells.
 """
+
+import contextlib
+import io
 
 import numpy as np
 import pytest
 
-from src import config, stress
+from src import config, properties, stress, transient
 
 # Aluminium values from math doc Section 9.2, written here so the tests do not
 # depend on config.BASE_CASE.
@@ -110,3 +115,91 @@ def test_alpema_limit_exceeds_annealed_yield():
     sigma_limit = stress.thermal_stress(config.ALPEMA_LIMITS["dT_stream_metal"], 70e9, 23e-6, 0.33)
     assert sigma_limit == pytest.approx(72.1e6, rel=0.01)
     assert sigma_limit > config.MATERIAL_LIMITS["sigma_y_3003_O"]
+
+
+def hand_made_transient(n_t=3, N=4):
+    """A hand-made transient result in which the cold gas warms up inside its inlet cell.
+
+    Every cell has T_h = 300 K, T_w = 290 K and T_c = 280 K, so the cells show
+    10 K stream-to-metal and 20 K stream-to-stream. The cold gas enters at
+    235 K, so the x = L face shows T_w,N - T_c_in = 55 K and T_h,N - T_c_in =
+    65 K. At the last saved time the metal at x = L is 5 K warmer.
+    """
+    T_w = np.full((n_t, N), 290.0)
+    T_w[-1, -1] = 295.0
+    return {
+        "t": np.linspace(0.0, 120.0, n_t), "x": (np.arange(N) + 0.5) * 0.7 / N,
+        "T_h": np.full((n_t, N), 300.0), "T_c": np.full((n_t, N), 280.0), "T_w": T_w,
+        "T_h_in": np.full(n_t, 300.0), "T_c_in": np.full(n_t, 235.0),
+    }
+
+
+def test_transient_check_finds_the_peak_on_the_inlet_face():
+    """stress_check_transient adds the two end faces, and reports where and when the peak is."""
+    r = hand_made_transient()
+    params = dict(ALUMINIUM, L=0.7)
+    check = stress.stress_check_transient(r, params, config.ALPEMA_LIMITS, 35e6)
+    per_K = stress.thermal_stress(1.0, 70e9, 23e-6, 0.33)
+
+    # Positions: the face at x = 0, the four cell centres, the face at x = L.
+    assert check["x"][0] == 0.0 and check["x"][-1] == 0.7
+    assert np.array_equal(check["x"][1:-1], r["x"])
+
+    # Metal-to-cold peak: T_w,N - T_c_in = 295 - 235 = 60 K on the x = L face at the last time.
+    peak = check["peaks"]["metal-to-cold"]
+    assert peak["dT"] == pytest.approx(60.0)
+    assert peak["sigma"] == pytest.approx(60.0 * per_K)
+    assert peak["x"] == pytest.approx(0.7)
+    assert peak["t"] == pytest.approx(120.0)
+    # Stream-to-stream peak: T_h,N - T_c_in = 65 K, also on the x = L face.
+    assert check["peaks"]["stream-to-stream"]["dT"] == pytest.approx(65.0)
+    assert check["peaks"]["stream-to-stream"]["x"] == pytest.approx(0.7)
+
+    # One value per saved time for the histories: 55 K, 55 K, then 60 K.
+    assert np.allclose(check["dT_max"]["metal-to-cold"], [55.0, 55.0, 60.0])
+    assert np.allclose(check["sigma_max"]["metal-to-cold"], per_K * np.array([55.0, 55.0, 60.0]))
+
+    # Both limits are exceeded on the face; the cells alone (10 K and 20 K) would pass.
+    assert not check["check"]["stream-to-metal"]["ok"]
+    assert not check["check"]["stream-to-stream"]["ok"]
+    cells = stress.stress_check(r["x"], r["T_h"], r["T_c"], r["T_w"], params, config.ALPEMA_LIMITS, 35e6)
+    assert cells["check"]["stream-to-metal"]["ok"] and cells["check"]["stream-to-stream"]["ok"]
+    assert "t = 120 s" in stress.summary_text(check)
+
+
+def test_transient_check_does_not_change_with_the_grid():
+    """Base-case cold trip on N = 50 and N = 100: the check with the end faces gives the same answer.
+
+    After the trip the residual cold gas warms up within a few millimetres of
+    its inlet, less than one cell. The cells alone then under-report the
+    stream-to-metal difference at x = L (29.9 K for N = 50, under the 30 K
+    limit, against a converged ~52.6 K). With the end faces the two grids
+    agree and both exceed the limit.
+    """
+    params = dict(config.BASE_CASE)
+    limits = config.ALPEMA_LIMITS
+    sigma_y = config.MATERIAL_LIMITS["sigma_y_3003_O"]
+    with contextlib.redirect_stdout(io.StringIO()):   # hide the surrogate fit printout
+        props = properties.build_surrogates(params, "cold_trip")
+    t_end = params["trip_t_start"] + 240.0
+    t_eval = np.linspace(0.0, t_end, 301)
+
+    faces, cells = {}, {}
+    for N in (50, 100):
+        r = transient.simulate(dict(params, N=N), props, "cold_trip", t_end, t_eval=t_eval)
+        check = stress.stress_check_transient(r, params, limits, sigma_y)
+        faces[N] = check["check"]["stream-to-metal"]
+        cells[N] = stress.alpema_difference_check(r["T_h"], r["T_c"], r["T_w"], limits)["stream-to-metal"]
+
+        # The stream-to-stream peak is the cold-end nozzle difference T_h,N - T_c_in, at x = L.
+        peak = check["peaks"]["stream-to-stream"]
+        assert peak["dT"] == pytest.approx(np.max(r["T_h"][:, -1] - r["T_c_in"]))
+        assert peak["x"] == pytest.approx(params["L"])
+        assert peak["t"] > params["trip_t_start"]
+
+    # With the faces: same verdict on both grids, and values within 5 % of each other.
+    assert not faces[50]["ok"] and not faces[100]["ok"]
+    assert faces[50]["value"] == pytest.approx(faces[100]["value"], rel=0.05)
+    # The cells alone are far lower on the coarse grid (the defect the faces remove).
+    assert cells[50]["value"] < 0.75 * faces[50]["value"]
+    assert cells[50]["value"] < cells[100]["value"] < faces[100]["value"]

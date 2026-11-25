@@ -16,6 +16,7 @@ SRC_MODULES = [
     "src.steady",
     "src.transient",
     "src.metrics",
+    "src.stress",
 ]
 
 
