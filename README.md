@@ -27,10 +27,10 @@ bahx-thermal-model/
 │   ├── correlations.py   fin geometry, Manglik-Bergles j, fin/surface efficiency, side conductances
 │   ├── steady.py         analytical ε-NTU solution, steady BVP (collocation + shooting), duty and energy closure
 │   ├── transient.py      method-of-lines transient, upset scenarios, discrete steady state, quasi-steady fallback
-│   ├── metrics.py        thermal-fatigue and ALPEMA metrics, grid-convergence order, smooth max, thermal stress
-│   └── stress.py         thermal stress check: ALPEMA difference limits and fully restrained stress (Eq 53)
+│   ├── metrics.py        thermal-fatigue and ALPEMA metrics (rates, temperature differences, hourly change), grid-convergence order, smooth max
+│   └── stress.py         thermal stress check, steady and transient: ALPEMA difference limits and fully restrained stress (Eq 53)
 ├── tests/                pytest verification checks (see CLAUDE.md "Verification")
-├── scripts/              runnable scripts that solve the model and save figures (run_steady.py, plot_heatmap.py, plot_transient.py)
+├── scripts/              runnable scripts that solve the model and save figures (run_steady.py, plot_heatmap.py, plot_transient.py, plot_stress.py, make_report_figures.py; report_figures.py holds the report's figure and table functions)
 ├── notebooks/            analysis notebooks; import from src/ and only make plots
 ├── figures/              saved figures from notebooks and scripts
 ├── data/                 small input data (e.g. NIST WebBook spot-check values)
@@ -68,7 +68,7 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-On a fresh clone, the setup, steady-state and transient tests should pass; only the transient grid-convergence test is skipped until `metrics.py` is implemented.
+On a fresh clone every test should pass (setup, steady state, transient, metrics and stress), with none skipped.
 
 ### Scripts
 
@@ -78,7 +78,11 @@ Run from the repo root (figures are saved to `figures/`):
 python -m scripts.run_steady     # base-case steady solution: prints duty and closure, saves steady_profiles.png
 python -m scripts.plot_heatmap   # same solution drawn as a temperature map, saves steady_heatmap.png
 python -m scripts.plot_transient # startup from rest: animated temperature profiles, saves startup.gif and startup_snapshots.png
+python -m scripts.plot_stress    # thermal stress check of every case: prints the checks, saves the four report_stress_*.png
+python -m scripts.make_report_figures  # every report figure (report_*.png) and all report tables (figures/report_tables.md); takes a few minutes
 ```
+
+The report figures are committed in `figures/`, with the numbers behind them in [figures/report_tables.md](figures/report_tables.md). Rerun `make_report_figures` after any change to `src/` or `src/config.py` so they stay in step with the code.
 
 ### Notebooks
 
@@ -95,7 +99,7 @@ if str(ROOT) not in sys.path:
 %load_ext autoreload
 %autoreload 2
 
-from src import config, properties, correlations, steady, transient, metrics
+from src import config, properties, correlations, steady, transient, metrics, stress
 
 FIG_DIR = ROOT / "figures"  # save with plt.savefig(FIG_DIR / "name.png")
 ```
@@ -107,7 +111,8 @@ Clear outputs before committing a notebook: `jupyter nbconvert --clear-output --
 The function signatures in `src/` are the agreement between teammates. The full details are in each module's docstring.
 
 - **`params`**: one flat dict of every input, `params = dict(config.BASE_CASE)`. To change something for a study (a ramp-rate sweep, a grid-convergence run), use a copy: `p = dict(params, ramp_t=600.0)`. Never edit `config.BASE_CASE` in place. Modules in `src/` never import `config`; callers pass `params` and `config.ALPEMA_LIMITS` in.
-- **`scenario`**: a name, `"none"`, `"feed_ramp"` or `"cold_trip"`. The numbers for each scenario live in `params`.
+- **`scenario`**: a name, `"none"`, `"feed_ramp"`, `"cold_trip"`, `"both_ramp"` or `"startup"` (`config.SCENARIOS`). The numbers for each scenario live in `params`. The last two are not in the math doc yet.
+- **Temperature differences in a transient** include the two end faces of the core (`metrics.with_end_faces`): the inlet temperatures are the stream temperatures on those faces, and the largest stream-to-stream and stream-to-metal differences sit there during a trip or a startup. Use `metrics.alpema_metrics(result)` and `stress.stress_check_transient(result, ...)`, not a maximum over the cells alone.
 - **`props`**: `{"h": surrogate, "c": surrogate}` from `properties.build_surrogates(params, scenario)`. It is built once with CoolProp and then passed into the solvers. Rebuild it when a pressure or the temperature range changes.
 - **`geom`**: `{"h": side_geom, "c": side_geom, "A_m": ..., "C_m": ...}` from `correlations.exchanger_geometry(params)`. Public solvers build it themselves from `params`; only right-hand-side functions and helpers take it as an argument.
 - **Shapes and units:** SI units throughout (K, Pa, kg/s, W, m). Steady profiles are `(n,)`, the `solve_bvp` state is `(2, m)`, the transient state is `(3N,)` ordered cell by cell `[T_h1, T_c1, T_w1, T_h2, ...]`, and transient histories are `(n_t, N)`.
